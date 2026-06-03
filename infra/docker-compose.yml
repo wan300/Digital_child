@@ -1,0 +1,164 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: memory_os
+      POSTGRES_USER: memory_os
+      POSTGRES_PASSWORD: memory_os
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory_os -d memory_os"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/letmemgraph
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.6
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  letta:
+    image: letta/letta:latest
+    environment:
+      LETTA_SERVER_PASSWORD: ${LETTA_SERVER_PASSWORD:-local-letta-password}
+      OPENAI_API_KEY: ${LLM_API_KEY:-}
+      OPENAI_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      HOST: 0.0.0.0
+      PORT: 8283
+    ports:
+      - "8283:8283"
+    volumes:
+      - letta_data:/var/lib/postgresql/data
+      - letta_state:/root/.letta
+
+  lightrag:
+    image: python:3.12-slim
+    working_dir: /srv/lightrag
+    environment:
+      PORT: 9621
+      LIGHTRAG_API_KEY: ${LIGHTRAG_API_KEY:-local-lightrag-key}
+      LLM_BINDING: openai
+      LLM_BINDING_HOST: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_BINDING_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${CHAT_MODEL:-gpt-4o}
+      KEYWORD_LLM_MODEL: ${MEMORY_MODEL:-gpt-4o-mini}
+      QUERY_LLM_MODEL: ${CHAT_MODEL:-gpt-4o}
+      EMBEDDING_BINDING: openai
+      EMBEDDING_BINDING_HOST: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      EMBEDDING_BINDING_API_KEY: ${LLM_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-large}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-3072}
+      LIGHTRAG_KV_STORAGE: JsonKVStorage
+      LIGHTRAG_DOC_STATUS_STORAGE: JsonDocStatusStorage
+      LIGHTRAG_GRAPH_STORAGE: NetworkXStorage
+      LIGHTRAG_VECTOR_STORAGE: NanoVectorDBStorage
+    command: >
+      sh -c "pip install --no-cache-dir 'lightrag-hku[api]' &&
+             lightrag-server --host 0.0.0.0 --port 9621 --key $${LIGHTRAG_API_KEY}"
+    ports:
+      - "9621:9621"
+    volumes:
+      - lightrag_data:/srv/lightrag
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://memory_os:memory_os@postgres:5432/memory_os
+      REDIS_URL: redis://redis:6379/0
+      LETTA_BASE_URL: http://letta:8283
+      NEO4J_URI: bolt://neo4j:7687
+      QDRANT_URL: http://qdrant:6333
+      LIGHTRAG_BASE_URL: http://lightrag:9621
+      BACKEND_CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+      BACKEND_WORKERS: 2
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()\""]
+      interval: 10s
+      timeout: 6s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  worker:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://memory_os:memory_os@postgres:5432/memory_os
+      REDIS_URL: redis://redis:6379/0
+      LETTA_BASE_URL: http://letta:8283
+      NEO4J_URI: bolt://neo4j:7687
+      QDRANT_URL: http://qdrant:6333
+      LIGHTRAG_BASE_URL: http://lightrag:9621
+    command: ["python", "-m", "app.workers.worker"]
+    depends_on:
+      backend:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  qdrant_data:
+  letta_data:
+  letta_state:
+  lightrag_data:

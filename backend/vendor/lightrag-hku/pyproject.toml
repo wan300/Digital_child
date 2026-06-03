@@ -1,0 +1,13 @@
+[project]
+name = "vendor-lightrag-hku"
+version = "0.0.0"
+description = "Vendored LightRAG package for human-memory-orchestrator"
+requires-python = ">=3.10"
+license = "MIT"
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["lightrag*"]
