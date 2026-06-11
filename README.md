@@ -43,12 +43,7 @@ docker compose -f infra/docker-compose.yml up --build
 http://localhost:8080
 ```
 
-默认管理员账号来自 `.env`：
-
-```text
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=change-me-now
-```
+当前本地运行已关闭登录/JWT。打开控制台即可使用所有功能，后端 API 不再要求 `Authorization` header，运行时统一按管理员权限处理。
 
 ## 开发模式
 
@@ -70,7 +65,7 @@ pnpm dev
 
 ## 第一轮验证
 
-1. 登录控制台。
+1. 打开控制台。
 2. 创建一个 `fictional_persona`。
 3. 点击“初始化”创建 Letta agent。
 4. 创建会话并发送：“请记住：我喜欢简洁直接的回答。”

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Bot,
@@ -17,7 +17,7 @@ import {
   Sparkles,
   Trash2
 } from "lucide-react";
-import { api } from "../api";
+import { api, worldApi } from "../api";
 import type {
   Conversation,
   Corpus,
@@ -26,7 +26,9 @@ import type {
   MemoryRecord,
   Message,
   Persona,
-  PersonaDraft
+  PersonaDraft,
+  SimAgent,
+  SimulationWorld
 } from "../types";
 import { EmptyState } from "./EmptyState";
 
@@ -41,6 +43,39 @@ const managementTabs = [
 ] as const;
 
 type ManagementView = (typeof managementTabs)[number][0];
+
+type PersonaWorldAgent = {
+  agent: SimAgent;
+  persona?: Persona;
+};
+
+type PersonaWorldGroup = {
+  world: SimulationWorld;
+  agents: PersonaWorldAgent[];
+  failed?: boolean;
+};
+
+const roleLabels: Record<string, string> = {
+  child: "儿童",
+  caregiver: "照护者",
+  teacher: "老师",
+  peer: "同伴",
+  npc: "角色"
+};
+
+function isChildGrowthWorld(world: SimulationWorld) {
+  return world.settings?.world_type === "child_growth_v1";
+}
+
+function agentRole(agent: SimAgent) {
+  const role = agent.traits?.role;
+  return typeof role === "string" && role ? role : "npc";
+}
+
+function agentRoleLabel(agent: SimAgent) {
+  const role = agentRole(agent);
+  return roleLabels[role] || role;
+}
 
 export function ManagementConsole({
   token,
@@ -58,10 +93,61 @@ export function ManagementConsole({
   notice: string;
 }) {
   const [view, setView] = useState<ManagementView>("personas");
+  const [worldGroups, setWorldGroups] = useState<PersonaWorldGroup[]>([]);
+  const [worldGroupsLoading, setWorldGroupsLoading] = useState(false);
+  const [worldGroupError, setWorldGroupError] = useState("");
   const selectedPersona = useMemo(
     () => personas.find((persona) => persona.id === selectedPersonaId),
     [personas, selectedPersonaId]
   );
+  const assignedPersonaIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const group of worldGroups) {
+      for (const row of group.agents) ids.add(row.agent.persona_id);
+    }
+    return ids;
+  }, [worldGroups]);
+  const unassignedPersonas = useMemo(
+    () => personas.filter((persona) => !assignedPersonaIds.has(persona.id)),
+    [assignedPersonaIds, personas]
+  );
+  const showUnassignedPersonas = !worldGroupsLoading || worldGroups.length > 0;
+
+  const refreshWorldGroups = useCallback(async () => {
+    setWorldGroupsLoading(true);
+    setWorldGroupError("");
+    try {
+      const worlds = (await worldApi.list(token)).filter(isChildGrowthWorld);
+      const personaById = new Map(personas.map((persona) => [persona.id, persona]));
+      const results = await Promise.allSettled(worlds.map((world) => worldApi.agents(token, world.id)));
+      const groups = worlds.map((world, index) => {
+        const result = results[index];
+        if (result.status !== "fulfilled") {
+          return { world, agents: [], failed: true };
+        }
+        return {
+          world,
+          agents: result.value.map((agent) => ({
+            agent,
+            persona: personaById.get(agent.persona_id)
+          }))
+        };
+      });
+      setWorldGroups(groups);
+      if (results.some((result) => result.status === "rejected")) {
+        setWorldGroupError("部分儿童世界角色加载失败。");
+      }
+    } catch (err) {
+      setWorldGroups([]);
+      setWorldGroupError(err instanceof Error ? err.message : "加载儿童世界角色失败");
+    } finally {
+      setWorldGroupsLoading(false);
+    }
+  }, [personas, token]);
+
+  useEffect(() => {
+    refreshWorldGroups().catch(console.error);
+  }, [refreshWorldGroups]);
 
   return (
     <section className="management-console">
@@ -72,11 +158,25 @@ export function ManagementConsole({
         </div>
         <select value={selectedPersonaId} onChange={(event) => setSelectedPersonaId(event.target.value)}>
           <option value="">选择人格</option>
-          {personas.map((persona) => (
-            <option key={persona.id} value={persona.id}>
-              {persona.name}
-            </option>
+          {worldGroups.map((group) => (
+            <optgroup key={group.world.id} label={group.world.name}>
+              {group.agents.map(({ agent, persona }) => (
+                <option key={`${group.world.id}-${agent.id}`} value={agent.persona_id}>
+                  {(persona?.name || agent.name) + `（${agentRoleLabel(agent)}）`}
+                </option>
+              ))}
+            </optgroup>
           ))}
+          {showUnassignedPersonas && unassignedPersonas.length > 0 && (
+            <optgroup label="未绑定儿童世界">
+              {unassignedPersonas.map((persona) => (
+                <option key={persona.id} value={persona.id}>
+                  {persona.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {worldGroupsLoading && worldGroups.length === 0 && <option disabled>正在加载儿童世界角色</option>}
         </select>
       </header>
       {notice && <div className="notice">{notice}</div>}
@@ -89,7 +189,17 @@ export function ManagementConsole({
         ))}
       </div>
       {view === "chat" && <ChatPage token={token} personaId={selectedPersonaId} />}
-      {view === "personas" && <PersonaPage token={token} personas={personas} refresh={refreshPersonas} />}
+      {view === "personas" && (
+        <PersonaPage
+          token={token}
+          personas={personas}
+          refresh={refreshPersonas}
+          worldGroups={worldGroups}
+          worldGroupsLoading={worldGroupsLoading}
+          worldGroupError={worldGroupError}
+          refreshWorldGroups={refreshWorldGroups}
+        />
+      )}
       {view === "memory" && <MemoryPage token={token} personaId={selectedPersonaId} />}
       {view === "timeline" && <TimelinePage token={token} personaId={selectedPersonaId} />}
       {view === "documents" && <DocumentsPage token={token} personaId={selectedPersonaId} />}
@@ -223,13 +333,41 @@ function EvidencePanel({ evidence }: { evidence: Evidence[] }) {
   );
 }
 
-function PersonaPage({ token, personas, refresh }: { token: string; personas: Persona[]; refresh: () => Promise<void> }) {
+function PersonaPage({
+  token,
+  personas,
+  refresh,
+  worldGroups,
+  worldGroupsLoading,
+  worldGroupError,
+  refreshWorldGroups
+}: {
+  token: string;
+  personas: Persona[];
+  refresh: () => Promise<void>;
+  worldGroups: PersonaWorldGroup[];
+  worldGroupsLoading: boolean;
+  worldGroupError: string;
+  refreshWorldGroups: () => Promise<void>;
+}) {
   const emptyForm = { name: "", description: "", persona_block: "", human_block: "", persona_type: "fictional_persona", consent_confirmed: false };
   const [form, setForm] = useState(emptyForm);
   const [generationDescription, setGenerationDescription] = useState("");
   const [generatedMemories, setGeneratedMemories] = useState<GeneratedMemoryDraft[]>([]);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
+  const assignedPersonaIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const group of worldGroups) {
+      for (const row of group.agents) ids.add(row.agent.persona_id);
+    }
+    return ids;
+  }, [worldGroups]);
+  const unassignedPersonas = useMemo(
+    () => personas.filter((persona) => !assignedPersonaIds.has(persona.id)),
+    [assignedPersonaIds, personas]
+  );
+  const showUnassignedPersonas = !worldGroupsLoading || worldGroups.length > 0;
   const generateDraft = async () => {
     if (!generationDescription.trim()) return;
     setGenerating(true);
@@ -289,6 +427,22 @@ function PersonaPage({ token, personas, refresh }: { token: string; personas: Pe
     await api<Persona>(`/personas/${id}/initialize-agent`, token, { method: "POST" });
     await refresh();
   };
+  const renderPersonaRow = (persona: Persona | undefined, key: string, agent?: SimAgent) => (
+    <article className="row-item" key={key}>
+      <div>
+        <strong>{persona?.name || agent?.name || "未知人格"}</strong>
+        <p>{persona?.description || persona?.persona_block || (agent ? `儿童世界角色：${agent.name}` : "未填写描述")}</p>
+        <small>
+          {agent ? `${agentRoleLabel(agent)} · ` : ""}
+          {persona?.persona_type || "未找到人格"} · {persona?.status || agent?.status || "unknown"} · {persona?.letta_agent_id || "未初始化"}
+        </small>
+      </div>
+      <button onClick={() => persona && init(persona.id)} disabled={!persona}>
+        <Bot size={16} />
+        初始化
+      </button>
+    </article>
+  );
   const updateGeneratedMemory = (index: number, changes: Partial<GeneratedMemoryDraft>) => {
     setGeneratedMemories((items) => items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...changes } : item)));
   };
@@ -363,22 +517,44 @@ function PersonaPage({ token, personas, refresh }: { token: string; personas: Pe
         </button>
       </div>
       <div className="panel">
-        <h2>人格列表</h2>
-        {personas.map((persona) => (
-          <article className="row-item" key={persona.id}>
-            <div>
-              <strong>{persona.name}</strong>
-              <p>{persona.description || persona.persona_block}</p>
-              <small>
-                {persona.persona_type} · {persona.status} · {persona.letta_agent_id || "未初始化"}
-              </small>
-            </div>
-            <button onClick={() => init(persona.id)}>
-              <Bot size={16} />
-              初始化
-            </button>
-          </article>
-        ))}
+        <div className="toolbar persona-list-toolbar">
+          <h2>儿童世界角色</h2>
+          <button onClick={() => void refreshWorldGroups()} disabled={worldGroupsLoading}>
+            <RefreshCw size={16} />
+            {worldGroupsLoading ? "刷新中" : "刷新分组"}
+          </button>
+        </div>
+        {worldGroupError && <p className="error">{worldGroupError}</p>}
+        {worldGroupsLoading && worldGroups.length === 0 && <EmptyState text="正在加载儿童世界角色。" />}
+        {!worldGroupsLoading && worldGroups.length === 0 && <EmptyState text="还没有儿童世界。未绑定的人格会显示在下方。" />}
+        <div className="world-persona-list">
+          {worldGroups.map((group) => (
+            <section className="world-persona-group" key={group.world.id}>
+              <div className="world-group-heading">
+                <div>
+                  <h3>{group.world.name}</h3>
+                  <small>
+                    {group.world.status} · tick {group.world.tick_no} · {group.agents.length} 个角色
+                  </small>
+                </div>
+              </div>
+              {group.failed && <p className="error">这个儿童世界的角色加载失败。</p>}
+              {!group.failed && group.agents.length === 0 && <EmptyState text="这个儿童世界还没有绑定角色。" />}
+              {group.agents.map(({ agent, persona }) => renderPersonaRow(persona, `${group.world.id}-${agent.id}`, agent))}
+            </section>
+          ))}
+          {showUnassignedPersonas && unassignedPersonas.length > 0 && (
+            <section className="world-persona-group">
+              <div className="world-group-heading">
+                <div>
+                  <h3>未绑定儿童世界</h3>
+                  <small>{unassignedPersonas.length} 个人格</small>
+                </div>
+              </div>
+              {unassignedPersonas.map((persona) => renderPersonaRow(persona, persona.id))}
+            </section>
+          )}
+        </div>
       </div>
     </section>
   );

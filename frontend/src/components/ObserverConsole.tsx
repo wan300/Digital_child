@@ -136,6 +136,7 @@ export function ObserverConsole({
 }) {
   const [worlds, setWorlds] = useState<SimulationWorld[]>([]);
   const [drafts, setDrafts] = useState<ChildWorldDraft[]>([]);
+  const [worldsLoaded, setWorldsLoaded] = useState(false);
   const [selectedWorldId, setSelectedWorldId] = useState("");
   const [state, setState] = useState<WorldStateProjection | null>(null);
   const [events, setEvents] = useState<SimulationEvent[]>([]);
@@ -177,6 +178,7 @@ export function ObserverConsole({
     () => state?.snapshots.find((snapshot) => snapshot.id === selectedSnapshotId) || null,
     [selectedSnapshotId, state?.snapshots]
   );
+  const canShowDraftPanel = worldsLoaded && !selectedWorldId;
 
   useEffect(() => {
     selectedWorldIdRef.current = selectedWorldId;
@@ -229,6 +231,7 @@ export function ObserverConsole({
       if (current && worldRows.some((world) => world.id === current)) return current;
       return worldRows.find((world) => world.settings?.world_type === "child_growth_v1" && world.status !== "archived")?.id || "";
     });
+    setWorldsLoaded(true);
   }, [token]);
 
   const refreshState = useCallback(
@@ -462,16 +465,18 @@ export function ObserverConsole({
       {notice && <div className="notice">{notice}</div>}
       {error && <div className="error">{error}</div>}
 
-      <DraftPanel
-        form={draftForm}
-        setForm={setDraftForm}
-        activeDraft={activeDraft}
-        drafts={drafts}
-        busy={draftBusy}
-        onCreateDraft={createDraft}
-        onConfirmDraft={confirmDraft}
-        onSelectDraft={setActiveDraft}
-      />
+      {canShowDraftPanel && (
+        <DraftPanel
+          form={draftForm}
+          setForm={setDraftForm}
+          activeDraft={activeDraft}
+          drafts={drafts}
+          busy={draftBusy}
+          onCreateDraft={createDraft}
+          onConfirmDraft={confirmDraft}
+          onSelectDraft={setActiveDraft}
+        />
+      )}
 
       {selectedWorld && (
         <SimulationControls
@@ -502,6 +507,7 @@ export function ObserverConsole({
               token={token}
               worldId={state.world.id}
               locations={state.locations}
+              agents={state.agents}
               interventions={interventions}
               onChanged={async () => {
                 await refreshState(state.world.id);
@@ -542,6 +548,7 @@ function DraftPanel({
   onSelectDraft: (draft: ChildWorldDraft | null) => void;
 }) {
   const draft = activeDraft || drafts.find((item) => !item.created_world_id) || null;
+  const child = asRecord(asRecord(draft?.parsed_draft).child);
   return (
     <section className="panel child-draft-panel">
       <div className="panel-heading">
@@ -613,10 +620,10 @@ function DraftPanel({
       {draft && (
         <article className="draft-review">
           <div>
-            <strong>{safeString(asRecord(draft.parsed_draft.child).name || "未命名儿童")}</strong>
+            <strong>{safeString(child.name || "未命名儿童")}</strong>
             <small>{draft.status} · {draft.created_world_id ? "已创建世界" : "待确认"}</small>
           </div>
-          <p>{safeString(asRecord(draft.parsed_draft.child).description || "草稿已生成。")}</p>
+          <DraftReviewContent draft={draft} />
           {draft.risk_flags.length > 0 && (
             <span className="status-pill warning">
               <AlertTriangle size={14} />
@@ -631,6 +638,186 @@ function DraftPanel({
       )}
     </section>
   );
+}
+
+function DraftReviewContent({ draft }: { draft: ChildWorldDraft }) {
+  const parsedDraft = asRecord(draft.parsed_draft);
+  const world = asRecord(parsedDraft.world);
+  const child = asRecord(parsedDraft.child);
+  const traits = asRecord(child.traits);
+  const needs = asRecord(child.needs);
+  const development = asRecord(child.development);
+  const initialMemories = asList(child.initial_memories);
+  const locations = asList(parsedDraft.locations).map(asRecord);
+  const npcs = asList(parsedDraft.npcs).map(asRecord);
+  const relationships = draftRelationships(parsedDraft, npcs);
+
+  return (
+    <div className="draft-review-content">
+      <section className="draft-section">
+        <h3>润色后的草稿内容</h3>
+        <div className="draft-summary-grid">
+          <Detail label="世界名称" value={safeString(world.name || "未命名世界")} />
+          <Detail label="儿童描述" value={safeString(child.description || "草稿已生成。")} />
+        </div>
+      </section>
+
+      <section className="draft-section">
+        <h3>核心设定</h3>
+        <div className="draft-block-grid">
+          <DraftTextBlock title="persona block" value={child.persona_block} />
+          <DraftTextBlock title="human block" value={child.human_block} />
+        </div>
+      </section>
+
+      <section className="draft-section">
+        <h3>特征</h3>
+        <DraftKeyValueGrid data={traits} />
+      </section>
+
+      <section className="draft-section">
+        <h3>Needs</h3>
+        {Object.keys(needs).length ? (
+          <BarList rows={Object.entries(needs).map(([key, value]) => [needLabel(key), metricNumber(value)] as const)} />
+        ) : (
+          <EmptyState text="草稿中没有 needs 条目。" />
+        )}
+      </section>
+
+      <section className="draft-section">
+        <h3>发展基线</h3>
+        {Object.keys(development).length ? (
+          <div className="development-grid">
+            {Object.entries(development).map(([key, value]) => {
+              const row = asRecord(value);
+              return (
+                <article key={key}>
+                  <strong>{developmentLabel(key)}</strong>
+                  <Progress value={metricNumber(row.score)} />
+                  <small>{safeString(row.trend || "stable")} · confidence {formatNumber(row.confidence)}</small>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState text="草稿中没有 development 条目。" />
+        )}
+      </section>
+
+      <section className="draft-section">
+        <h3>初始记忆</h3>
+        {initialMemories.length ? (
+          <ul className="draft-list">
+            {initialMemories.map((memory, index) => (
+              <li key={index}>{safeString(memory)}</li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState text="草稿中没有初始记忆。" />
+        )}
+      </section>
+
+      <section className="draft-section">
+        <h3>地点</h3>
+        <DraftEntityList
+          emptyText="草稿中没有地点。"
+          items={locations}
+          renderItem={(location, index) => (
+            <article className="draft-entity" key={`${safeString(location.name)}-${index}`}>
+              <strong>{safeString(location.name || "未命名地点")}</strong>
+              <small>{safeString(location.kind || "place")}</small>
+              <p>{safeString(location.description)}</p>
+            </article>
+          )}
+        />
+      </section>
+
+      <section className="draft-section">
+        <h3>NPC</h3>
+        <DraftEntityList
+          emptyText="草稿中没有 NPC。"
+          items={npcs}
+          renderItem={(npc, index) => (
+            <article className="draft-entity" key={`${safeString(npc.name)}-${index}`}>
+              <strong>{safeString(npc.display_label || npc.name || "未命名 NPC")}</strong>
+              <small>
+                {safeString(npc.role || "npc")} · {safeString(npc.relationship_type || "未设置关系类型")}
+              </small>
+              <p>{safeString(npc.description)}</p>
+              {Object.keys(asRecord(npc.traits)).length > 0 && <DraftKeyValueGrid data={asRecord(npc.traits)} compact />}
+            </article>
+          )}
+        />
+      </section>
+
+      <section className="draft-section">
+        <h3>关系</h3>
+        <DraftEntityList
+          emptyText="草稿中没有关系条目，确认创建时会按角色生成默认关系。"
+          items={relationships}
+          renderItem={(relationship, index) => (
+            <article className="draft-entity" key={`${safeString(relationship.relationship_type)}-${index}`}>
+              <strong>{safeString(relationship.npc_name || relationship.name || relationship.relationship_type || relationship.type || `关系 ${index + 1}`)}</strong>
+              <small>{safeString(relationship.relationship_type || relationship.type || "关系")}</small>
+              <DraftKeyValueGrid data={relationship} compact />
+            </article>
+          )}
+        />
+      </section>
+
+      <details className="draft-technical-details">
+        <summary>技术详情：模型原始响应</summary>
+        <pre>{draft.raw_response || "无原始响应"}</pre>
+      </details>
+    </div>
+  );
+}
+
+function DraftTextBlock({ title, value }: { title: string; value: unknown }) {
+  return (
+    <article className="draft-text-block">
+      <strong>{title}</strong>
+      <p>{safeString(value || "未填写")}</p>
+    </article>
+  );
+}
+
+function DraftKeyValueGrid({ data, compact = false }: { data: Record<string, unknown>; compact?: boolean }) {
+  const entries = Object.entries(data);
+  if (!entries.length) return <EmptyState text="没有可展示条目。" />;
+  return (
+    <dl className={compact ? "draft-key-values compact" : "draft-key-values"}>
+      {entries.map(([key, value]) => (
+        <div key={key}>
+          <dt>{key}</dt>
+          <dd>{formatDraftValue(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function DraftEntityList({
+  items,
+  emptyText,
+  renderItem
+}: {
+  items: Record<string, unknown>[];
+  emptyText: string;
+  renderItem: (item: Record<string, unknown>, index: number) => ReactNode;
+}) {
+  if (!items.length) return <EmptyState text={emptyText} />;
+  return <div className="draft-entity-grid">{items.map(renderItem)}</div>;
+}
+
+function draftRelationships(parsedDraft: Record<string, unknown>, npcs: Record<string, unknown>[]) {
+  const explicitRelationships = asList(parsedDraft.relationships).map(asRecord);
+  if (explicitRelationships.length) return explicitRelationships;
+  return npcs.map((npc) => ({
+    npc_name: safeString(npc.display_label || npc.name || "未命名 NPC"),
+    relationship_type: safeString(npc.relationship_type || npc.role || "npc"),
+    summary: "确认创建时会为该 NPC 生成初始关系记录。"
+  }));
 }
 
 function SimulationControls({
@@ -750,14 +937,16 @@ function ChildInspector({ state }: { state: WorldStateProjection }) {
         })}
       </div>
       <div className="mini-list">
-        <h3>半天摘要</h3>
+        <h3>半天记录</h3>
         {child.half_day_summaries.slice(-4).reverse().map((item, index) => {
           const row = asRecord(item);
+          const lifeSlice = readLifeSlice(row.life_slice);
           return (
             <article key={`${row.tick_no}-${index}`}>
               <strong>step {safeString(row.tick_no)}</strong>
               <p>{safeString(row.summary)}</p>
               <small>{safeString(row.child_interpretation)}</small>
+              {lifeSlice && <LifeSliceView lifeSlice={lifeSlice} />}
             </article>
           );
         })}
@@ -807,20 +996,31 @@ function InterventionPanel({
   token,
   worldId,
   locations,
+  agents,
   interventions,
   onChanged
 }: {
   token: string;
   worldId: string;
   locations: WorldLocation[];
+  agents: WorldStateProjection["agents"];
   interventions: UserIntervention[];
   onChanged: () => Promise<void>;
 }) {
   const [type, setType] = useState("environment_event");
   const [text, setText] = useState("");
   const [locationId, setLocationId] = useState("");
+  const [targetRole, setTargetRole] = useState("");
+  const [agentId, setAgentId] = useState("");
+  const [activityGoal, setActivityGoal] = useState("");
+  const [guidanceStyle, setGuidanceStyle] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const targetAgents = agents.filter((agent) => {
+    const role = safeString(agent.traits?.role);
+    if (role === "child") return false;
+    return !targetRole || role === targetRole;
+  });
 
   const submit = async () => {
     if (!text.trim() || submitting) return;
@@ -829,9 +1029,18 @@ function InterventionPanel({
     try {
       await worldApi.createIntervention(token, worldId, {
         intervention_type: type,
-        payload: { text: text.trim(), location_id: locationId || undefined }
+        payload: {
+          text: text.trim(),
+          location_id: locationId || undefined,
+          target_role: targetRole || undefined,
+          agent_id: agentId || undefined,
+          activity_goal: activityGoal.trim() || undefined,
+          guidance_style: guidanceStyle.trim() || undefined
+        }
       });
       setText("");
+      setActivityGoal("");
+      setGuidanceStyle("");
       await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "提交干预失败");
@@ -850,7 +1059,7 @@ function InterventionPanel({
         <Send size={20} />
       </div>
       {error && <p className="error">{error}</p>}
-      <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="例如：老师今天在入园时蹲下来提醒，照护者会在午后准时来接。" />
+      <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="例如：老师今天在入园时蹲下来提醒，妈妈会在午后准时来接。" />
       <div className="inline">
         <select value={type} onChange={(event) => setType(event.target.value)}>
           <option value="environment_event">环境事件</option>
@@ -867,6 +1076,38 @@ function InterventionPanel({
             </option>
           ))}
         </select>
+        <select
+          value={targetRole}
+          onChange={(event) => {
+            setTargetRole(event.target.value);
+            setAgentId("");
+          }}
+        >
+          <option value="">不指定角色</option>
+          <option value="caregiver">家庭成人</option>
+          <option value="teacher">老师</option>
+          <option value="peer">同伴</option>
+        </select>
+        <select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
+          <option value="">不指定人物</option>
+          {targetAgents.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="inline">
+        <input
+          value={activityGoal}
+          onChange={(event) => setActivityGoal(event.target.value)}
+          placeholder="活动目标，例如：积木合作活动"
+        />
+        <input
+          value={guidanceStyle}
+          onChange={(event) => setGuidanceStyle(event.target.value)}
+          placeholder="引导方式，例如：蹲下来分步骤提示"
+        />
         <button className="primary" onClick={submit} disabled={!text.trim() || submitting}>
           <Send size={16} />
           注入
@@ -875,12 +1116,24 @@ function InterventionPanel({
       <div className="mini-list">
         <h3>近期干预</h3>
         {!interventions.length && <EmptyState text="还没有干预记录。" />}
-        {interventions.slice(0, 4).map((intervention) => (
-          <article key={intervention.id}>
-            <strong>{safeString(intervention.payload.text || intervention.intervention_type)}</strong>
-            <small>{intervention.status} · {formatDateTime(intervention.created_at)}</small>
-          </article>
-        ))}
+        {interventions.slice(0, 4).map((intervention) => {
+          const payload = asRecord(intervention.payload);
+          const detail = [
+            interventionRoleLabel(safeString(payload.target_role)),
+            safeString(payload.activity_goal),
+            safeString(payload.guidance_style)
+          ].filter(Boolean);
+          return (
+            <article key={intervention.id}>
+              <strong>{safeString(payload.text || intervention.intervention_type)}</strong>
+              {detail.length > 0 && <p>{detail.join(" · ")}</p>}
+              <small>
+                {intervention.status} · {formatDateTime(intervention.created_at)}
+                {intervention.result_event_id ? ` · 已关联事件 ${intervention.result_event_id.slice(0, 8)}` : ""}
+              </small>
+            </article>
+          );
+        })}
       </div>
     </section>
   );
@@ -980,11 +1233,13 @@ function EventTimeline({ events, locations }: { events: SimulationEvent[]; locat
       {!events.length && <EmptyState text="还没有半天事件。" />}
       {events.map((event) => {
         const location = locations.find((item) => item.id === event.location_id);
+        const lifeSlice = readLifeSlice(event.payload.life_slice);
         return (
           <article key={event.id} className={event.status === "needs_review" ? "event-item needs-review" : "event-item"}>
             <div>
               <strong>{safeString(event.payload.half_day_summary || event.payload.summary || event.event_type)}</strong>
               <p>{safeString(event.payload.child_interpretation || event.payload.action_text || "")}</p>
+              {lifeSlice && <LifeSliceView lifeSlice={lifeSlice} />}
               <details>
                 <summary>GM 解释与证据</summary>
                 <p className="muted">
@@ -1005,6 +1260,27 @@ function EventTimeline({ events, locations }: { events: SimulationEvent[]; locat
         );
       })}
     </section>
+  );
+}
+
+type LifeSlice = {
+  sceneDescription: string;
+  dialogue: { speaker: string; text: string }[];
+};
+
+function LifeSliceView({ lifeSlice }: { lifeSlice: LifeSlice }) {
+  return (
+    <div className="life-slice">
+      {lifeSlice.sceneDescription && <p className="life-slice-scene">{lifeSlice.sceneDescription}</p>}
+      <div className="life-slice-dialogue">
+        {lifeSlice.dialogue.map((turn, index) => (
+          <p key={`${turn.speaker}-${index}`}>
+            <strong>{turn.speaker}</strong>
+            <span>{turn.text}</span>
+          </p>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1094,6 +1370,38 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function asList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function formatDraftValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "未填写";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value, null, 2);
+}
+
+function readLifeSlice(value: unknown): LifeSlice | null {
+  const row = asRecord(value);
+  const sceneDescription = safeString(row.scene_description || row.sceneDescription || row.scene);
+  const rawDialogue = Array.isArray(row.dialogue) ? row.dialogue : [];
+  const dialogue = rawDialogue
+    .map((item) => {
+      if (typeof item === "string" && item.includes("：")) {
+        const [speaker, ...rest] = item.split("：");
+        return { speaker: speaker.trim(), text: rest.join("：").trim() };
+      }
+      const turn = asRecord(item);
+      return {
+        speaker: safeString(turn.speaker || turn.role),
+        text: safeString(turn.text || turn.line || turn.content)
+      };
+    })
+    .filter((turn) => turn.speaker && turn.text)
+    .slice(0, 20);
+  if (!sceneDescription && !dialogue.length) return null;
+  return { sceneDescription, dialogue };
+}
+
 function metricNumber(value: unknown): number {
   return typeof value === "number" ? Math.round(value) : Number(value) || 0;
 }
@@ -1141,7 +1449,12 @@ function developmentLabel(key: string) {
 }
 
 function relationshipLabel(key: string) {
-  return ({ caregiver: "照护者", teacher: "老师", peer: "同伴" }[key] || key);
+  return ({ caregiver: "家庭成人", teacher: "老师", peer: "同伴" }[key] || key);
+}
+
+function interventionRoleLabel(key: string) {
+  if (!key) return "";
+  return ({ caregiver: "家庭成人", teacher: "老师", peer: "同伴" }[key] || key);
 }
 
 function relationshipMetricLabel(key: string) {

@@ -373,7 +373,7 @@ class ChildWorldDraftService:
                     "name": payload.caregiver_1_label,
                     "role": "caregiver",
                     "display_label": payload.caregiver_1_label,
-                    "description": "主要照护者之一，提供稳定日常照护。",
+                    "description": f"{payload.caregiver_1_label}，提供稳定日常陪伴。",
                     "traits": {"role": "caregiver", "care_style": "稳定回应"},
                     "relationship_type": "caregiver",
                 },
@@ -381,7 +381,7 @@ class ChildWorldDraftService:
                     "name": payload.caregiver_2_label,
                     "role": "caregiver",
                     "display_label": payload.caregiver_2_label,
-                    "description": "主要照护者之一，参与陪伴和生活规则。",
+                    "description": f"{payload.caregiver_2_label}，参与陪伴和生活规则。",
                     "traits": {"role": "caregiver", "care_style": "温和边界"},
                     "relationship_type": "caregiver",
                 },
@@ -684,6 +684,7 @@ class ChildGrowthStepper:
             )
         ).scalars().all()
         child = self._child_agent(world, list(agents))
+        agent_by_id = {agent.id: agent for agent in agents}
         state = await self._ensure_state(session, child)
         relationships = (
             await session.execute(
@@ -712,12 +713,29 @@ class ChildGrowthStepper:
             )
         ).scalars().all()
 
+        sanitized_interventions, intervention_flags = self._intervention_context(list(interventions))
         schedule = self._schedule_for_step(tick_no)
+        intervention_plan = self._intervention_plan(
+            sanitized_interventions,
+            schedule=schedule,
+            locations=list(locations),
+            relationships=list(relationships),
+            agent_by_id=agent_by_id,
+        )
+        schedule = self._schedule_with_intervention(schedule, intervention_plan)
         location = self._location_for_schedule(schedule, list(locations))
+        if intervention_plan and intervention_plan.get("location_id"):
+            location = next((item for item in locations if item.id == intervention_plan["location_id"]), location)
         random_event = self._random_event(list(templates), tick_no=tick_no, reference_time=reference_time, rng=rng)
         involved_relationships = self._involved_relationships(schedule, list(relationships), rng)
-        sanitized_interventions, intervention_flags = self._intervention_context(list(interventions))
-        action_text = self._action_text(child, schedule, location, random_event, sanitized_interventions)
+        involved_relationships = self._relationships_for_intervention(
+            intervention_plan,
+            base_relationships=involved_relationships,
+            relationships=list(relationships),
+            agent_by_id=agent_by_id,
+        )
+        involved_actors = self._relationship_actors(involved_relationships, agent_by_id)
+        action_text = self._action_text(child, schedule, location, random_event, sanitized_interventions, involved_actors, intervention_plan)
         context = self._context(
             world=world,
             child=child,
@@ -727,9 +745,12 @@ class ChildGrowthStepper:
             locations=list(locations),
             relationships=list(relationships),
             involved_relationships=involved_relationships,
+            involved_actors=involved_actors,
+            agent_by_id=agent_by_id,
             rules=self.rulebook.active_rules(list(rules), now=world.clock_time),
             recent_events=list(recent_events),
             interventions=sanitized_interventions,
+            intervention_plan=intervention_plan,
             random_event=random_event,
         )
 
@@ -746,7 +767,9 @@ class ChildGrowthStepper:
             risk_flags=intervention_flags,
             tick_no=tick_no,
             involved_relationships=involved_relationships,
+            involved_actors=involved_actors,
             interventions=sanitized_interventions,
+            intervention_plan=intervention_plan,
         )
         important_memory_writes = self._important_memory_writes(
             child=child,
@@ -784,6 +807,7 @@ class ChildGrowthStepper:
                 "gm_interpretation": outcome["gm_interpretation"],
                 "state_update_evidence": outcome["state_update_evidence"],
                 "half_day_summary": outcome["half_day_summary"],
+                "life_slice": outcome["life_slice"],
                 "summary": outcome["half_day_summary"],
                 "suggested_updates": outcome["suggested_updates"],
                 "relationship_changes": relationship_changes,
@@ -797,6 +821,8 @@ class ChildGrowthStepper:
                 "concordia_wrapper_error": outcome["concordia_wrapper_error"],
                 "random_event": self._template_context(random_event) if random_event else None,
                 "interventions": sanitized_interventions,
+                "intervention_plan": intervention_plan,
+                "intervention_effect_summary": self._intervention_effect_summary(intervention_plan, involved_actors),
             },
         )
         session.add(event)
@@ -892,6 +918,279 @@ class ChildGrowthStepper:
             preferred = relationships
         return rng.sample(preferred, k=min(len(preferred), 2)) if preferred else []
 
+    def _intervention_plan(
+        self,
+        interventions: list[dict[str, Any]],
+        *,
+        schedule: dict[str, Any],
+        locations: list[WorldLocation],
+        relationships: list[AgentRelationship],
+        agent_by_id: dict[str, SimAgent],
+    ) -> dict[str, Any] | None:
+        if not interventions:
+            return None
+        primary = interventions[0]
+        payload = dict(primary.get("payload") or {})
+        text = self._clean_intervention_value(primary.get("text") or payload.get("text") or payload.get("description"))
+        location_id = self._clean_intervention_value(payload.get("location_id"), limit=80)
+        location = next((item for item in locations if item.id == location_id), None) if location_id else None
+        agent_id = self._clean_intervention_value(payload.get("agent_id"), limit=80)
+        target_role = self._normalize_target_role(payload.get("target_role") or payload.get("relationship_type") or payload.get("role"))
+        matched_relationship = self._relationship_for_agent(agent_id, relationships) if agent_id else None
+        if matched_relationship is None and text:
+            matched_relationship = self._relationship_from_text(text, relationships, agent_by_id)
+        if matched_relationship is not None:
+            agent_id = matched_relationship.npc_agent_id
+            target_role = target_role or matched_relationship.relationship_type
+        if not target_role:
+            target_role = self._infer_target_role(str(primary.get("type") or ""), text)
+
+        scene = self._normalize_scene(payload.get("scene") or payload.get("target_scene"))
+        if location is not None:
+            scene = location.kind
+        elif not scene and target_role in {"teacher", "peer"}:
+            scene = "kindergarten"
+
+        activity_goal = self._clean_intervention_value(payload.get("activity_goal") or payload.get("goal") or payload.get("activity"), limit=160)
+        guidance_style = self._clean_intervention_value(payload.get("guidance_style") or payload.get("style") or payload.get("adult_behavior"), limit=160)
+        if not guidance_style and text:
+            guidance_style = self._infer_guidance_style(text)
+
+        return {
+            "id": primary.get("id"),
+            "type": primary.get("type"),
+            "text": text,
+            "location_id": location.id if location is not None else (location_id or None),
+            "location_kind": location.kind if location is not None else None,
+            "scene": scene or None,
+            "target_role": target_role,
+            "agent_id": agent_id or None,
+            "activity_goal": activity_goal or None,
+            "guidance_style": guidance_style or None,
+            "base_scene": schedule.get("scene"),
+            "base_main": schedule.get("main"),
+            "applies_to": "next_step",
+        }
+
+    def _schedule_with_intervention(self, schedule: dict[str, Any], intervention_plan: dict[str, Any] | None) -> dict[str, Any]:
+        if not intervention_plan:
+            return schedule
+        updated = dict(schedule)
+        scene = self._normalize_scene(intervention_plan.get("scene"))
+        if scene:
+            updated["scene"] = scene
+            updated["domains"] = self._domains_for_scene(scene)
+        activity_goal = str(intervention_plan.get("activity_goal") or "").strip()
+        if activity_goal:
+            updated["main"] = activity_goal
+        updated["intervention_override"] = True
+        return updated
+
+    def _relationships_for_intervention(
+        self,
+        intervention_plan: dict[str, Any] | None,
+        *,
+        base_relationships: list[AgentRelationship],
+        relationships: list[AgentRelationship],
+        agent_by_id: dict[str, SimAgent],
+    ) -> list[AgentRelationship]:
+        if not intervention_plan:
+            return base_relationships
+        selected: list[AgentRelationship] = []
+        agent_id = str(intervention_plan.get("agent_id") or "").strip()
+        target_role = str(intervention_plan.get("target_role") or "").strip()
+        text = str(intervention_plan.get("text") or "").strip()
+        for candidate in [
+            self._relationship_for_agent(agent_id, relationships) if agent_id else None,
+            self._relationship_from_text(text, relationships, agent_by_id) if text else None,
+            self._relationship_for_role(target_role, relationships) if target_role else None,
+        ]:
+            if candidate is not None and candidate.id not in {item.id for item in selected}:
+                selected.append(candidate)
+        for relationship in base_relationships:
+            if relationship.id not in {item.id for item in selected}:
+                selected.append(relationship)
+        return selected[:3] if selected else base_relationships
+
+    def _clean_intervention_value(self, value: Any, *, limit: int = 240) -> str:
+        return str(value or "").strip()[:limit]
+
+    def _normalize_scene(self, value: Any) -> str:
+        scene = str(value or "").strip().lower()
+        aliases = {
+            "kindergarten": "kindergarten",
+            "school": "kindergarten",
+            "classroom": "kindergarten",
+            "幼儿园": "kindergarten",
+            "教室": "kindergarten",
+            "home": "home",
+            "family": "home",
+            "家": "home",
+            "家庭": "home",
+            "community": "community",
+            "outdoor": "community",
+            "park": "community",
+            "社区": "community",
+            "户外": "community",
+        }
+        return aliases.get(scene, scene if scene in {"kindergarten", "home", "community"} else "")
+
+    def _domains_for_scene(self, scene: str) -> list[str]:
+        if scene == "kindergarten":
+            return ["language_communication", "social_cooperation", "cognitive_attention"]
+        if scene == "community":
+            return ["motor_ability", "language_communication", "cognitive_attention"]
+        return ["self_care_habits", "emotional_regulation", "language_communication"]
+
+    def _normalize_target_role(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        lowered = raw.lower()
+        if lowered in {"caregiver", "adult", "parent", "family"} or raw in {"成人", "家长", "照护者", "家庭成人", "爸爸", "妈妈"}:
+            return "caregiver"
+        if lowered in {"teacher", "educator"} or "老师" in raw:
+            return "teacher"
+        if lowered in {"peer", "classmate", "friend"} or raw in {"同伴", "小朋友", "伙伴"}:
+            return "peer"
+        return lowered if lowered in {"caregiver", "teacher", "peer"} else ""
+
+    def _infer_target_role(self, intervention_type: str, text: str) -> str:
+        lowered = text.lower()
+        if "老师" in text or "teacher" in lowered:
+            return "teacher"
+        if any(token in text for token in ("同伴", "小朋友", "伙伴")) or "peer" in lowered:
+            return "peer"
+        if any(token in text for token in ("爸爸", "妈妈", "奶奶", "爷爷", "外婆", "外公", "家长", "照护者", "成人")):
+            return "caregiver"
+        if intervention_type == "adult_behavior":
+            return "caregiver"
+        return ""
+
+    def _infer_guidance_style(self, text: str) -> str:
+        if "蹲" in text or "平视" in text:
+            return "蹲下来平视提示"
+        if "慢" in text or "放慢" in text:
+            return "放慢节奏提示"
+        if "提醒" in text:
+            return "清晰温和提醒"
+        return ""
+
+    def _relationship_for_agent(self, agent_id: str, relationships: list[AgentRelationship]) -> AgentRelationship | None:
+        if not agent_id:
+            return None
+        return next((relationship for relationship in relationships if relationship.npc_agent_id == agent_id), None)
+
+    def _relationship_for_role(self, relationship_type: str, relationships: list[AgentRelationship]) -> AgentRelationship | None:
+        if not relationship_type:
+            return None
+        return next((relationship for relationship in relationships if relationship.relationship_type == relationship_type), None)
+
+    def _relationship_from_text(
+        self,
+        text: str,
+        relationships: list[AgentRelationship],
+        agent_by_id: dict[str, SimAgent],
+    ) -> AgentRelationship | None:
+        if not text:
+            return None
+        for relationship in relationships:
+            agent = agent_by_id.get(relationship.npc_agent_id)
+            if agent is None:
+                continue
+            traits = dict(agent.traits or {})
+            labels = [agent.name, str(traits.get("display_label") or "")]
+            if any(label and label in text for label in labels):
+                return relationship
+        return None
+
+    def _intervention_effect_summary(self, intervention_plan: dict[str, Any] | None, involved_actors: list[dict[str, Any]]) -> str:
+        if not intervention_plan:
+            return ""
+        actor_text = self._actor_text(
+            involved_actors,
+            fallback=self._relationship_role_label(str(intervention_plan.get("target_role") or ""), "") or "相关成人/NPC",
+        )
+        goal = str(intervention_plan.get("activity_goal") or "本次半天活动")
+        style = str(intervention_plan.get("guidance_style") or "温和间接支持")
+        text = str(intervention_plan.get("text") or "")
+        return f"下一步优先执行间接干预：由{actor_text}以“{style}”引导儿童参与“{goal}”。{text}"
+
+    def _relationship_actors(self, relationships: list[AgentRelationship], agent_by_id: dict[str, SimAgent]) -> list[dict[str, Any]]:
+        actors: list[dict[str, Any]] = []
+        for relationship in relationships:
+            agent = agent_by_id.get(relationship.npc_agent_id)
+            traits = dict(agent.traits or {}) if agent is not None else {}
+            display_label = str(traits.get("display_label") or (agent.name if agent is not None else relationship.npc_agent_id[:8])).strip()
+            relationship_type = relationship.relationship_type
+            actors.append(
+                {
+                    "relationship_id": relationship.id,
+                    "agent_id": relationship.npc_agent_id,
+                    "relationship_type": relationship_type,
+                    "name": agent.name if agent is not None else display_label,
+                    "display_label": display_label,
+                    "role_label": self._relationship_role_label(relationship_type, display_label),
+                }
+            )
+        return actors
+
+    def _relationship_role_label(self, relationship_type: str, display_label: str) -> str:
+        if relationship_type == "teacher":
+            return display_label or "老师"
+        if relationship_type == "peer":
+            return display_label or "同伴"
+        if relationship_type == "caregiver":
+            return display_label or "熟悉成人"
+        return display_label or relationship_type
+
+    def _actor_text(self, actors: list[dict[str, Any]], *, fallback: str = "身边成人") -> str:
+        labels: list[str] = []
+        for actor in actors:
+            label = str(actor.get("display_label") or actor.get("name") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        if not labels:
+            return fallback
+        return "、".join(labels[:3])
+
+    def _actors_by_type(self, actors: list[dict[str, Any]], relationship_type: str) -> list[dict[str, Any]]:
+        return [actor for actor in actors if actor.get("relationship_type") == relationship_type]
+
+    def _first_actor_label(self, actors: list[dict[str, Any]], relationship_type: str | None = None) -> str:
+        rows = self._actors_by_type(actors, relationship_type) if relationship_type else actors
+        for actor in rows:
+            label = str(actor.get("display_label") or actor.get("name") or "").strip()
+            if label:
+                return label
+        return ""
+
+    def _family_labels(self, child: SimAgent) -> list[str]:
+        family = child.traits.get("family_structure") if isinstance(child.traits, dict) else {}
+        if not isinstance(family, dict):
+            return []
+        labels: list[str] = []
+        for value in family.values():
+            if not isinstance(value, dict):
+                continue
+            label = str(value.get("display_label") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _caregiver_replacement(self, *, child: SimAgent, involved_actors: list[dict[str, Any]]) -> str:
+        for label in [
+            self._first_actor_label(involved_actors, "caregiver"),
+            *self._family_labels(child),
+        ]:
+            if label and "照护者" not in label:
+                return label
+        return ""
+
+    def _replace_generic_caregiver(self, text: str, *, child: SimAgent, involved_actors: list[dict[str, Any]]) -> str:
+        replacement = self._caregiver_replacement(child=child, involved_actors=involved_actors)
+        if not replacement:
+            return text
+        return text.replace("主要照护者", replacement).replace("照护者", replacement)
+
     def _intervention_context(self, interventions: list[UserIntervention]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
         rows: list[dict[str, Any]] = []
         flags: list[dict[str, str]] = []
@@ -918,12 +1217,26 @@ class ChildGrowthStepper:
         location: WorldLocation | None,
         random_event: RandomEventTemplate | None,
         interventions: list[dict[str, Any]],
+        involved_actors: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
     ) -> str:
-        parts = [f"{child.name}在{location.name if location else schedule['scene']}经历半天：{schedule['main']}。"]
+        place = location.name if location else schedule["scene"]
+        if involved_actors:
+            actor_text = self._actor_text(involved_actors)
+            parts = [f"{child.name}在{place}和{actor_text}经历半天：{schedule['main']}。"]
+        elif schedule["scene"] == "home" and self._family_labels(child):
+            actor_text = "、".join(self._family_labels(child)[:2])
+            parts = [f"{child.name}在{place}和{actor_text}经历半天：{schedule['main']}。"]
+        else:
+            parts = [f"{child.name}在{place}经历半天：{schedule['main']}。"]
         if random_event is not None:
             parts.append(f"温和随机事件：{random_event.effect_prompt}")
         if interventions:
             parts.append(f"观察者注入事件：{interventions[0]['text']}")
+        if intervention_plan:
+            goal = str(intervention_plan.get("activity_goal") or schedule["main"])
+            style = str(intervention_plan.get("guidance_style") or "温和间接支持")
+            parts.append(f"本步优先执行干预计划：用“{style}”引导{child.name}参与“{goal}”。")
         return " ".join(parts)
 
     def _context(
@@ -937,9 +1250,12 @@ class ChildGrowthStepper:
         locations: list[WorldLocation],
         relationships: list[AgentRelationship],
         involved_relationships: list[AgentRelationship],
+        involved_actors: list[dict[str, Any]],
+        agent_by_id: dict[str, SimAgent],
         rules: list[CommunityRule],
         recent_events: list[SimulationEvent],
         interventions: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
         random_event: RandomEventTemplate | None,
     ) -> dict[str, Any]:
         return {
@@ -955,14 +1271,18 @@ class ChildGrowthStepper:
             "schedule": schedule,
             "location": self._location_context(location),
             "locations": [self._location_context(item) for item in locations],
-            "relationships": [self._relationship_context(item) for item in relationships],
-            "involved_relationships": [self._relationship_context(item) for item in involved_relationships],
+            "relationships": [self._relationship_context(item, agent_by_id) for item in relationships],
+            "involved_relationships": [self._relationship_context(item, agent_by_id) for item in involved_relationships],
+            "involved_actors": involved_actors,
+            "caregiver_display_labels": self._family_labels(child),
             "rules": self.rulebook.to_context(rules),
             "recent_events": [{"tick_no": event.tick_no, "summary": event.payload.get("summary") or event.payload.get("half_day_summary")} for event in recent_events],
             "interventions": interventions,
+            "intervention_plan": intervention_plan,
             "random_event": self._template_context(random_event) if random_event else None,
             "output_contract": {
-                "required": ["observed_facts", "child_interpretation", "gm_interpretation", "state_update_evidence", "half_day_summary"],
+                "required": ["observed_facts", "child_interpretation", "gm_interpretation", "state_update_evidence", "half_day_summary", "life_slice"],
+                "life_slice": {"scene_description": "one concrete scene", "dialogue": "10-20 turns, child centered, no metrics or GM explanation"},
                 "state_policy": "LLM suggests meaning only; backend clamps needs, development and relationships.",
             },
         }
@@ -972,11 +1292,17 @@ class ChildGrowthStepper:
             return None
         return {"id": location.id, "name": location.name, "kind": location.kind, "description": location.description}
 
-    def _relationship_context(self, relationship: AgentRelationship) -> dict[str, Any]:
+    def _relationship_context(self, relationship: AgentRelationship, agent_by_id: dict[str, SimAgent] | None = None) -> dict[str, Any]:
+        agent = agent_by_id.get(relationship.npc_agent_id) if agent_by_id else None
+        traits = dict(agent.traits or {}) if agent is not None else {}
+        display_label = str(traits.get("display_label") or (agent.name if agent is not None else relationship.npc_agent_id[:8]))
         return {
             "id": relationship.id,
             "npc_agent_id": relationship.npc_agent_id,
             "relationship_type": relationship.relationship_type,
+            "npc_name": agent.name if agent is not None else "",
+            "display_label": display_label,
+            "role_label": self._relationship_role_label(relationship.relationship_type, display_label),
             "metrics": relationship.metrics,
             "last_summary": relationship.last_summary,
         }
@@ -997,11 +1323,13 @@ class ChildGrowthStepper:
         risk_flags: list[dict[str, str]],
         tick_no: int,
         involved_relationships: list[AgentRelationship],
+        involved_actors: list[dict[str, Any]],
         interventions: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
     ) -> dict[str, Any]:
         sub_fragments = raw.get("sub_fragments") if isinstance(raw.get("sub_fragments"), list) else []
         if not sub_fragments:
-            sub_fragments = self._sub_fragments(schedule, random_event)
+            sub_fragments = self._sub_fragments(schedule, random_event, involved_actors, intervention_plan)
         fallback = bool(raw.get("fallback_reason"))
         unstructured = raw.get("gm_source") == "unstructured"
         deterministic_summary = self._fallback_half_day_summary(
@@ -1012,6 +1340,19 @@ class ChildGrowthStepper:
             random_event=random_event,
             interventions=interventions,
             tick_no=tick_no,
+            involved_actors=involved_actors,
+            intervention_plan=intervention_plan,
+        )
+        deterministic_life_slice = self._fallback_life_slice(
+            child=child,
+            schedule=schedule,
+            location=location,
+            sub_fragments=[str(item) for item in sub_fragments[:3]],
+            random_event=random_event,
+            interventions=interventions,
+            tick_no=tick_no,
+            involved_actors=involved_actors,
+            intervention_plan=intervention_plan,
         )
         if fallback or unstructured:
             observed = self._fallback_observed_facts(
@@ -1021,14 +1362,18 @@ class ChildGrowthStepper:
                 sub_fragments=[str(item) for item in sub_fragments[:3]],
                 random_event=random_event,
                 interventions=interventions,
+                involved_actors=involved_actors,
+                intervention_plan=intervention_plan,
             )
             half_day_summary = deterministic_summary
-            child_interpretation = self._child_voice(schedule, random_event, tick_no=tick_no)
+            child_interpretation = self._child_voice(child, schedule, random_event, involved_actors=involved_actors, tick_no=tick_no)
             gm_interpretation = self._fallback_gm_interpretation(
                 schedule=schedule,
                 random_event=random_event,
                 interventions=interventions,
                 involved_relationships=involved_relationships,
+                involved_actors=involved_actors,
+                intervention_plan=intervention_plan,
             )
             state_update_evidence = self._fallback_state_update_evidence(
                 schedule=schedule,
@@ -1037,8 +1382,10 @@ class ChildGrowthStepper:
                 random_event=random_event,
                 interventions=interventions,
                 involved_relationships=involved_relationships,
+                intervention_plan=intervention_plan,
             )
             suggested_updates = self._fallback_suggested_updates(schedule=schedule, involved_relationships=involved_relationships)
+            life_slice = deterministic_life_slice
         else:
             observed = raw.get("observed_facts") if isinstance(raw.get("observed_facts"), list) else []
             if not observed:
@@ -1049,10 +1396,12 @@ class ChildGrowthStepper:
                     sub_fragments=[str(item) for item in sub_fragments[:3]],
                     random_event=random_event,
                     interventions=interventions,
+                    involved_actors=involved_actors,
+                    intervention_plan=intervention_plan,
                 )
             half_day_summary = str(raw.get("half_day_summary") or raw.get("summary") or deterministic_summary)
-            child_interpretation = str(raw.get("child_interpretation") or self._child_voice(schedule, random_event, tick_no=tick_no))
-            gm_interpretation = str(raw.get("gm_interpretation") or self._fallback_gm_interpretation(schedule=schedule, random_event=random_event, interventions=interventions, involved_relationships=involved_relationships))
+            child_interpretation = str(raw.get("child_interpretation") or self._child_voice(child, schedule, random_event, involved_actors=involved_actors, tick_no=tick_no))
+            gm_interpretation = str(raw.get("gm_interpretation") or self._fallback_gm_interpretation(schedule=schedule, random_event=random_event, interventions=interventions, involved_relationships=involved_relationships, involved_actors=involved_actors, intervention_plan=intervention_plan))
             state_update_evidence = raw.get("state_update_evidence") if isinstance(raw.get("state_update_evidence"), list) else []
             if not state_update_evidence:
                 state_update_evidence = self._fallback_state_update_evidence(
@@ -1062,19 +1411,35 @@ class ChildGrowthStepper:
                     random_event=random_event,
                     interventions=interventions,
                     involved_relationships=involved_relationships,
+                    intervention_plan=intervention_plan,
                 )
             suggested_updates = raw.get("suggested_updates") if isinstance(raw.get("suggested_updates"), dict) else {}
             if not suggested_updates:
                 suggested_updates = self._fallback_suggested_updates(schedule=schedule, involved_relationships=involved_relationships)
+            life_slice = self._normalize_life_slice(raw.get("life_slice"), deterministic_life_slice, child=child, involved_actors=involved_actors)
+        half_day_summary = self._replace_generic_caregiver(half_day_summary, child=child, involved_actors=involved_actors)
+        child_interpretation = self._replace_generic_caregiver(child_interpretation, child=child, involved_actors=involved_actors)
+        gm_interpretation = self._replace_generic_caregiver(gm_interpretation, child=child, involved_actors=involved_actors)
+        observed = [self._replace_generic_caregiver(str(item), child=child, involved_actors=involved_actors) for item in observed[:5]]
+        if intervention_plan and not any(isinstance(item, dict) and item.get("source") == "intervention_plan" for item in state_update_evidence):
+            plan_evidence = {
+                "source": "intervention_plan",
+                "detail": self._intervention_effect_summary(intervention_plan, involved_actors),
+                "activity_goal": intervention_plan.get("activity_goal"),
+                "guidance_style": intervention_plan.get("guidance_style"),
+                "target_role": intervention_plan.get("target_role"),
+            }
+            state_update_evidence = [*state_update_evidence[:4], plan_evidence]
         return {
             "accepted": bool(raw.get("accepted", True)),
-            "main_action": schedule["main"] if fallback else str(raw.get("main_action") or schedule["main"]),
+            "main_action": str((intervention_plan or {}).get("activity_goal") or (schedule["main"] if fallback else raw.get("main_action") or schedule["main"])),
             "sub_fragments": [str(item) for item in sub_fragments[:3]],
-            "observed_facts": [str(item) for item in observed[:5]],
+            "observed_facts": observed,
             "child_interpretation": child_interpretation,
             "gm_interpretation": gm_interpretation,
             "state_update_evidence": state_update_evidence,
             "half_day_summary": half_day_summary,
+            "life_slice": life_slice,
             "suggested_updates": suggested_updates,
             "risk_flags": risk_flags + (raw.get("risk_flags") if isinstance(raw.get("risk_flags"), list) else []),
             "needs_review": bool(raw.get("needs_review") or risk_flags),
@@ -1093,14 +1458,22 @@ class ChildGrowthStepper:
         sub_fragments: list[str],
         random_event: RandomEventTemplate | None,
         interventions: list[dict[str, Any]],
+        involved_actors: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
     ) -> list[str]:
         place = location.name if location else schedule["scene"]
-        facts = [f"{child.name}在{place}进行半天主行动：{schedule['main']}。"]
+        actor_text = self._actor_text(involved_actors, fallback="身边成人")
+        if involved_actors:
+            facts = [f"{child.name}在{place}和{actor_text}进行半天主行动：{schedule['main']}。"]
+        else:
+            facts = [f"{child.name}在{place}进行半天主行动：{schedule['main']}。"]
         facts.extend(f"观察到子片段：{fragment}。" for fragment in sub_fragments[:2])
         if random_event is not None:
             facts.append(f"本半天出现温和随机事件：{random_event.name}。")
         if interventions:
             facts.append(f"观察者注入的间接事件已进入环境：{safe_memory_text(interventions[0].get('text'))}。")
+        if intervention_plan and intervention_plan.get("activity_goal"):
+            facts.append(f"本步活动目标已按干预调整为：{intervention_plan['activity_goal']}。")
         return facts[:5]
 
     def _fallback_half_day_summary(
@@ -1113,33 +1486,171 @@ class ChildGrowthStepper:
         random_event: RandomEventTemplate | None,
         interventions: list[dict[str, Any]],
         tick_no: int,
+        involved_actors: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
     ) -> str:
         place = location.name if location else schedule["scene"]
+        actor_text = self._actor_text(involved_actors, fallback="身边成人")
+        if not involved_actors and schedule["scene"] == "home" and self._family_labels(child):
+            actor_text = "、".join(self._family_labels(child)[:2])
         scene_templates = {
             "kindergarten": [
-                "{name}在{place}先完成入园过渡，再参与{focus}，半天里有了同伴和老师互动的证据。",
+                "{name}在{place}先完成入园过渡，再和{actors}参与{focus}，半天里有了具体互动的证据。",
                 "{name}在{place}围绕{focus}展开活动，能看到分离适应、集体规则和自由游戏之间的切换。",
                 "{name}在{place}经历了{focus}，留下了语言表达、注意跟随和合作尝试的观察点。",
             ],
             "home": [
-                "{name}回到{place}后以{focus}为主，照护者回应和整理步骤构成了这半天的核心经历。",
-                "{name}在{place}围绕{focus}慢慢收束状态，半天记录重点落在安全感、自理和情绪恢复。",
-                "{name}在{place}完成{focus}，能看到熟悉关系对节奏、表达和整理行为的支持。",
+                "{name}回到{place}后以{focus}为主，{actors}的回应和整理步骤构成了这半天的核心经历。",
+                "{name}在{place}和{actors}围绕{focus}慢慢收束状态，半天记录重点落在安全感、自理和情绪恢复。",
+                "{name}在{place}完成{focus}，能看到{actors}对节奏、表达和整理行为的支持。",
             ],
             "community": [
-                "{name}在{place}通过{focus}接触户外变化，半天记录集中在探索、身体活动和分享发现。",
+                "{name}在{place}和{actors}通过{focus}接触户外变化，半天记录集中在探索、身体活动和分享发现。",
                 "{name}在{place}围绕{focus}展开观察，新的环境线索带来了运动、语言和注意证据。",
                 "{name}在{place}完成{focus}，这半天更像一次温和的外部世界探索。",
             ],
         }
         focus = "、".join(sub_fragments[:2]) if sub_fragments else schedule["main"]
         templates = scene_templates.get(schedule["scene"], ["{name}在{place}完成{focus}，形成了可观察的半天经历。"])
-        summary = templates[(tick_no - 1) % len(templates)].format(name=child.name, place=place, focus=focus)
+        summary = templates[(tick_no - 1) % len(templates)].format(name=child.name, place=place, focus=focus, actors=actor_text)
         if random_event is not None:
             summary += f" 同时出现了“{random_event.name}”，为本次观察增加了轻微变化。"
         if interventions:
             summary += " 观察者注入的间接事件被纳入环境，但状态变化仍由后端规则裁剪。"
+        if intervention_plan and intervention_plan.get("guidance_style"):
+            summary += f" 本次引导方式按干预设置为“{intervention_plan['guidance_style']}”。"
         return summary
+
+    def _fallback_life_slice(
+        self,
+        *,
+        child: SimAgent,
+        schedule: dict[str, Any],
+        location: WorldLocation | None,
+        sub_fragments: list[str],
+        random_event: RandomEventTemplate | None,
+        interventions: list[dict[str, Any]],
+        tick_no: int,
+        involved_actors: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        place = location.name if location else schedule["scene"]
+        family_labels = self._family_labels(child)
+        caregiver = self._first_actor_label(involved_actors, "caregiver") or (family_labels[(tick_no - 1) % len(family_labels)] if family_labels else "大人")
+        other_family = next((label for label in family_labels if label != caregiver), caregiver)
+        pickup_label = family_labels[0] if family_labels else caregiver
+        teacher = self._first_actor_label(involved_actors, "teacher") or "老师"
+        peer = self._first_actor_label(involved_actors, "peer") or "小伙伴"
+        focus = str((intervention_plan or {}).get("activity_goal") or (sub_fragments[0] if sub_fragments else schedule["main"]))
+        temperament_line = self._temperament_child_line(child)
+        event_line = f"刚才有{random_event.name}，我看见了。" if random_event is not None else "我还想再试一次。"
+        guided_goal = str((intervention_plan or {}).get("activity_goal") or focus)
+        guided_style = str((intervention_plan or {}).get("guidance_style") or "慢慢来")
+
+        if schedule["scene"] == "kindergarten":
+            scene_description = f"{place}里，{child.name}在{teacher}和{peer}旁边慢慢进入活动，片段集中在{focus}。"
+            dialogue = [
+                {"speaker": teacher, "text": f"{child.name}，你可以先把小包放到自己的位置。"},
+                {"speaker": child.name, "text": "我放这里吗？"},
+                {"speaker": teacher, "text": "对，就是这个格子。"},
+                {"speaker": child.name, "text": f"我想看一下{pickup_label}会不会来。"},
+                {"speaker": teacher, "text": f"{pickup_label}下午会来接你，现在我们先去看看桌上的材料。"},
+                {"speaker": child.name, "text": temperament_line},
+                {"speaker": peer, "text": "你要不要和我一起搭这个？"},
+                {"speaker": child.name, "text": "我拿蓝色的，可以吗？"},
+                {"speaker": peer, "text": "可以，我拿红色的。"},
+                {"speaker": child.name, "text": "这个高高的，不要倒。"},
+                {"speaker": teacher, "text": "你们可以一人放一个，慢慢来。"},
+                {"speaker": child.name, "text": event_line},
+                {"speaker": teacher, "text": "等会儿收材料时，我会再提醒一次。"},
+                {"speaker": child.name, "text": "我可以把蓝色的放回盒子里。"},
+            ]
+        elif schedule["scene"] == "community":
+            scene_description = f"{place}里，{child.name}和{caregiver}边走边看，把户外发现说出来。"
+            dialogue = [
+                {"speaker": caregiver, "text": "我们走慢一点，看路边有什么变化。"},
+                {"speaker": child.name, "text": f"{caregiver}，这里有一片小叶子。"},
+                {"speaker": caregiver, "text": "你可以蹲下来看看，不要离开我太远。"},
+                {"speaker": child.name, "text": "它有一点弯弯的。"},
+                {"speaker": caregiver, "text": "你发现了形状。还想看哪里？"},
+                {"speaker": child.name, "text": temperament_line},
+                {"speaker": child.name, "text": "我想摸一下这个石头。"},
+                {"speaker": caregiver, "text": "可以，用手指轻轻碰一下。"},
+                {"speaker": child.name, "text": "凉凉的。"},
+                {"speaker": caregiver, "text": "那我们把手擦一擦。"},
+                {"speaker": child.name, "text": event_line},
+                {"speaker": caregiver, "text": "你可以告诉我刚才最喜欢什么。"},
+                {"speaker": child.name, "text": "我喜欢那个小叶子。"},
+                {"speaker": caregiver, "text": "好，回家后你可以画给我看。"},
+            ]
+        else:
+            scene_description = f"{place}里，{child.name}和{caregiver}围绕{focus}慢慢收束半天节奏。"
+            dialogue = [
+                {"speaker": caregiver, "text": "我们先把桌上的东西收一收。"},
+                {"speaker": child.name, "text": f"{caregiver}，这个是我刚才玩的。"},
+                {"speaker": caregiver, "text": "我看见了，你可以先放回盒子。"},
+                {"speaker": child.name, "text": "我要放蓝色的。"},
+                {"speaker": caregiver, "text": "可以，蓝色的先进去。"},
+                {"speaker": child.name, "text": temperament_line},
+                {"speaker": other_family, "text": "放完以后我们去洗手。"},
+                {"speaker": child.name, "text": "我自己拿毛巾。"},
+                {"speaker": caregiver, "text": "好，我在旁边等你。"},
+                {"speaker": child.name, "text": "我还差一个。"},
+                {"speaker": caregiver, "text": "最后一个放好就完成了。"},
+                {"speaker": child.name, "text": event_line},
+                {"speaker": other_family, "text": "那我们一起检查一下。"},
+                {"speaker": child.name, "text": "都放好了，我要去洗手。"},
+            ]
+
+        if interventions:
+            guide_speaker = self._first_actor_label(involved_actors, str((intervention_plan or {}).get("target_role") or "")) or (caregiver if schedule["scene"] != "kindergarten" else teacher)
+            dialogue[-2] = {"speaker": guide_speaker, "text": f"今天我们按“{guided_style}”来，先一起试试{guided_goal}。"}
+        return {
+            "scene_description": scene_description,
+            "dialogue": dialogue[:20],
+            "participants": [child.name, *[str(actor.get("display_label") or actor.get("name")) for actor in involved_actors if actor.get("display_label") or actor.get("name")]][:5],
+        }
+
+    def _temperament_child_line(self, child: SimAgent) -> str:
+        temperament = str((child.traits or {}).get("temperament_baseline") or "")
+        if "敏感" in temperament or "慢热" in temperament:
+            return "我先看一下，再放进去。"
+        if "活泼" in temperament or "运动" in temperament:
+            return "我想快一点，还想再来一次。"
+        if "安静" in temperament or "专注" in temperament:
+            return "我想把这个放整齐。"
+        return "我自己试试看。"
+
+    def _normalize_life_slice(self, value: Any, fallback: dict[str, Any], *, child: SimAgent, involved_actors: list[dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return fallback
+        scene_description = str(value.get("scene_description") or value.get("scene") or "").strip()
+        raw_dialogue = value.get("dialogue")
+        if not scene_description or not isinstance(raw_dialogue, list):
+            return fallback
+        dialogue: list[dict[str, str]] = []
+        for item in raw_dialogue:
+            speaker = ""
+            text = ""
+            if isinstance(item, dict):
+                speaker = str(item.get("speaker") or item.get("role") or "").strip()
+                text = str(item.get("text") or item.get("line") or item.get("content") or "").strip()
+            elif isinstance(item, str) and "：" in item:
+                speaker, text = [part.strip() for part in item.split("：", 1)]
+            if speaker and text:
+                dialogue.append(
+                    {
+                        "speaker": self._replace_generic_caregiver(speaker, child=child, involved_actors=involved_actors),
+                        "text": self._replace_generic_caregiver(text, child=child, involved_actors=involved_actors),
+                    }
+                )
+        if len(dialogue) < 10:
+            return fallback
+        return {
+            "scene_description": self._replace_generic_caregiver(scene_description, child=child, involved_actors=involved_actors),
+            "dialogue": dialogue[:20],
+            "participants": value.get("participants") if isinstance(value.get("participants"), list) else fallback.get("participants", []),
+        }
 
     def _fallback_gm_interpretation(
         self,
@@ -1148,11 +1659,13 @@ class ChildGrowthStepper:
         random_event: RandomEventTemplate | None,
         interventions: list[dict[str, Any]],
         involved_relationships: list[AgentRelationship],
+        involved_actors: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
     ) -> str:
         domain_labels = [DEVELOPMENT_DOMAINS.get(key, key) for key in schedule.get("domains", [])]
         relationship_roles = sorted({relationship.relationship_type for relationship in involved_relationships})
-        role_labels = {"caregiver": "照护者", "teacher": "老师", "peer": "同伴"}
-        relationship_text = "、".join(role_labels.get(role, role) for role in relationship_roles) or "当前场景关系"
+        role_labels = {"caregiver": "家庭成人", "teacher": "老师", "peer": "同伴"}
+        relationship_text = self._actor_text(involved_actors, fallback="、".join(role_labels.get(role, role) for role in relationship_roles) or "当前场景关系")
         parts = [
             f"本地 GM 将这半天解释为一次{schedule['main']}相关的日常经历，主要提供{', '.join(domain_labels)}的证据。",
             f"关系层面重点观察{relationship_text}互动，先记录证据，不直接做大幅关系或发展分数调整。",
@@ -1161,6 +1674,8 @@ class ChildGrowthStepper:
             parts.append(f"随机事件“{random_event.name}”被按温和事件处理，只扩大观察线索，不生成高风险叙事。")
         if interventions:
             parts.append("观察者干预被视为环境条件变化，不能直接改儿童状态。")
+        if intervention_plan and intervention_plan.get("activity_goal"):
+            parts.append(f"本步优先把活动组织到“{intervention_plan['activity_goal']}”，作为下一步环境引导而非直接状态修改。")
         return " ".join(parts)
 
     def _fallback_state_update_evidence(
@@ -1172,6 +1687,7 @@ class ChildGrowthStepper:
         random_event: RandomEventTemplate | None,
         interventions: list[dict[str, Any]],
         involved_relationships: list[AgentRelationship],
+        intervention_plan: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         evidence: list[dict[str, Any]] = [
             {
@@ -1197,6 +1713,15 @@ class ChildGrowthStepper:
             evidence.append({"source": "random_event", "detail": random_event.name, "severity": random_event.severity})
         if interventions:
             evidence.append({"source": "observer_intervention", "detail": safe_memory_text(interventions[0].get("text"))})
+        if intervention_plan:
+            plan_evidence = {
+                "source": "intervention_plan",
+                "detail": self._intervention_effect_summary(intervention_plan, []),
+                "activity_goal": intervention_plan.get("activity_goal"),
+                "guidance_style": intervention_plan.get("guidance_style"),
+                "target_role": intervention_plan.get("target_role"),
+            }
+            return [*evidence[:4], plan_evidence]
         return evidence[:5]
 
     def _fallback_suggested_updates(self, *, schedule: dict[str, Any], involved_relationships: list[AgentRelationship]) -> dict[str, Any]:
@@ -1243,18 +1768,37 @@ class ChildGrowthStepper:
             )
         return writes
 
-    def _sub_fragments(self, schedule: dict[str, Any], random_event: RandomEventTemplate | None) -> list[str]:
+    def _sub_fragments(
+        self,
+        schedule: dict[str, Any],
+        random_event: RandomEventTemplate | None,
+        involved_actors: list[dict[str, Any]] | None = None,
+        intervention_plan: dict[str, Any] | None = None,
+    ) -> list[str]:
+        actors = involved_actors or []
+        home_actor = self._actor_text(self._actors_by_type(actors, "caregiver"), fallback="熟悉成人")
+        school_actor = self._actor_text(actors, fallback="老师和同伴")
+        community_actor = self._actor_text(actors, fallback="身边成人")
+        activity_goal = str((intervention_plan or {}).get("activity_goal") or "").strip()
+        guidance_style = str((intervention_plan or {}).get("guidance_style") or "").strip()
         fragments = {
-            "kindergarten": ["入园时确认成人会回来接", "参与一次集体或自由游戏", "在老师提示下整理材料"],
-            "home": ["和照护者完成生活过渡", "进行一段自由玩耍或交流", "练习整理和自理步骤"],
-            "community": ["观察户外环境", "尝试一种身体活动", "和成人分享发现"],
+            "kindergarten": [f"入园时和{school_actor}确认接送安排", "参与一次集体或自由游戏", "在老师提示下整理材料"],
+            "home": [f"和{home_actor}完成生活过渡", "进行一段自由玩耍或交流", "练习整理和自理步骤"],
+            "community": ["观察户外环境", "尝试一种身体活动", f"和{community_actor}分享发现"],
         }.get(schedule["scene"], ["完成半天日常活动"])
+        if activity_goal:
+            fragments[1 if len(fragments) > 1 else 0] = f"在{self._actor_text(actors)}支持下参与{activity_goal}"
+        if guidance_style and len(fragments) > 2:
+            fragments[2] = f"使用{guidance_style}完成活动过渡"
         if random_event is not None:
             fragments = [*fragments[:2], random_event.name]
         return fragments[:3]
 
-    def _child_voice(self, schedule: dict[str, Any], random_event: RandomEventTemplate | None, *, tick_no: int) -> str:
+    def _child_voice(self, child: SimAgent, schedule: dict[str, Any], random_event: RandomEventTemplate | None, *, involved_actors: list[dict[str, Any]], tick_no: int) -> str:
         suffix = "，有一点不一样。" if random_event else "。"
+        family_labels = self._family_labels(child)
+        home_label = self._first_actor_label(involved_actors, "caregiver") or (family_labels[0] if family_labels else "大人")
+        community_label = self._first_actor_label(involved_actors) or home_label
         if schedule["scene"] == "kindergarten":
             variants = [
                 f"我进幼儿园的时候有点看大人，后来跟着大家玩了一会儿{suffix}",
@@ -1264,14 +1808,14 @@ class ChildGrowthStepper:
             return variants[(tick_no - 1) % len(variants)]
         if schedule["scene"] == "community":
             variants = [
-                f"我在外面看到了新东西，想告诉大人{suffix}",
+                f"我在外面看到了新东西，想告诉{community_label}{suffix}",
                 f"外面的东西有点多，我一边走一边看{suffix}",
-                f"我想摸一摸、看一看，再跟大人说我发现了什么{suffix}",
+                f"我想摸一摸、看一看，再跟{community_label}说我发现了什么{suffix}",
             ]
             return variants[(tick_no - 1) % len(variants)]
         variants = [
             f"我回到熟悉的地方，慢慢把事情做完{suffix}",
-            f"在家里我比较知道接下来要做什么，也想让大人陪一下{suffix}",
+            f"在家里我比较知道接下来要做什么，也想让{home_label}陪一下{suffix}",
             f"我有点累了，但熟悉的人在旁边，我可以一点一点整理好{suffix}",
         ]
         return variants[(tick_no - 1) % len(variants)]
@@ -1286,7 +1830,14 @@ class ChildGrowthStepper:
         if tick_no % 14 == 0:
             development = self._settle_development(development)
         summaries = list(metadata.get("half_day_summaries") or [])
-        summaries.append({"tick_no": tick_no, "summary": outcome["half_day_summary"], "child_interpretation": outcome["child_interpretation"]})
+        summaries.append(
+            {
+                "tick_no": tick_no,
+                "summary": outcome["half_day_summary"],
+                "child_interpretation": outcome["child_interpretation"],
+                "life_slice": outcome["life_slice"],
+            }
+        )
         metadata["half_day_summaries"] = summaries[-28:]
         metadata["development"] = development
         if outcome["memory_writes"]:

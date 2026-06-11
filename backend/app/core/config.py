@@ -17,9 +17,9 @@ class Settings(BaseSettings):
     )
 
     admin_username: str = "admin"
-    admin_password: str = "change-me-now"
+    admin_password: str = "12345678"
     user_username: str = "user"
-    user_password: str = "change-me-now"
+    user_password: str = "12345678"
     jwt_secret: str = "replace-with-a-long-random-secret"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24

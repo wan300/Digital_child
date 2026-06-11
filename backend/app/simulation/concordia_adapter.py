@@ -211,7 +211,7 @@ class ConcordiaAdapter:
             value = self._extract_partial_json_value(text, key)
             if value is not None:
                 salvaged[key] = value
-        useful_keys = {"summary", "half_day_summary", "gm_interpretation", "observed_facts", "child_interpretation"}
+        useful_keys = {"summary", "half_day_summary", "life_slice", "gm_interpretation", "observed_facts", "child_interpretation"}
         return salvaged if useful_keys.intersection(salvaged) else None
 
     def _extract_partial_json_value(self, text: str, key: str) -> Any | None:
@@ -244,6 +244,7 @@ class ConcordiaAdapter:
             "gm_interpretation": str(data.get("gm_interpretation") or ""),
             "state_update_evidence": data.get("state_update_evidence") if isinstance(data.get("state_update_evidence"), list) else [],
             "half_day_summary": str(data.get("half_day_summary") or data.get("summary") or ""),
+            "life_slice": data.get("life_slice") if isinstance(data.get("life_slice"), dict) else {},
             "suggested_updates": data.get("suggested_updates") if isinstance(data.get("suggested_updates"), dict) else {},
             "risk_flags": data.get("risk_flags") if isinstance(data.get("risk_flags"), list) else [],
             "state_changes": data.get("state_changes") if isinstance(data.get("state_changes"), dict) else {},
@@ -271,6 +272,7 @@ class ConcordiaAdapter:
             "gm_interpretation": "Deterministic fallback resolved the action without external GM output.",
             "state_update_evidence": [],
             "half_day_summary": f"{agent.get('name') or 'The environment'} proceeds deterministically.",
+            "life_slice": {},
             "suggested_updates": {},
             "risk_flags": [],
             "state_changes": {
@@ -297,6 +299,7 @@ class ConcordiaAdapter:
             "gm_interpretation": "",
             "state_update_evidence": [],
             "half_day_summary": "",
+            "life_slice": {},
             "suggested_updates": {},
             "risk_flags": [],
             "state_changes": {},

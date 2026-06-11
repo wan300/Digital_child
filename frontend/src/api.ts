@@ -29,10 +29,11 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
+export async function api<T>(path: string, _token: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers || {});
   if (!(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  // Auth/JWT is disabled. Keep the token parameter for component API
+  // compatibility, but do not send Authorization headers.
 
   const response = await fetch(`${API}${path}`, { ...init, headers });
   if (!response.ok) {
@@ -118,6 +119,7 @@ export const worldApi = {
       metadata?: Record<string, unknown>;
     }
   ) => api<SimAgent>(`/worlds/${worldId}/agents`, token, { method: "POST", body: JSON.stringify(payload) }),
+  agents: (token: string, worldId: string) => api<SimAgent[]>(`/worlds/${worldId}/agents`, token),
   createRule: (
     token: string,
     worldId: string,

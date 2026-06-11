@@ -49,8 +49,8 @@ async def test_child_growth_draft_confirm_step_report_and_replay(tmp_path) -> No
                 "template_key": "sensitive_slow_to_warm",
                 "child_name": "小禾",
                 "age_months": 50,
-                "caregiver_1_label": "奶奶",
-                "caregiver_2_label": "叔叔",
+                "caregiver_1_label": "爸爸",
+                "caregiver_2_label": "妈妈",
                 "kindergarten_class": "星星班",
                 "peer_count": 3,
                 "natural_language_prompt": "喜欢积木，入园时有一点慢热。",
@@ -74,16 +74,31 @@ async def test_child_growth_draft_confirm_step_report_and_replay(tmp_path) -> No
         assert {location["kind"] for location in state["locations"]} == {"home", "kindergarten", "community"}
         assert len(state["relationships"]) >= 5
         assert len([agent for agent in state["agents"] if agent["traits"].get("role") == "peer"]) >= 2
+        kindergarten_location_id = next(location["id"] for location in state["locations"] if location["kind"] == "kindergarten")
 
-        bad_intervention = await client.post(
-            f"/api/worlds/{world_id}/interventions",
-            json={"intervention_type": "gm_event", "payload": {"needs": {"energy": 100}}},
-        )
-        assert bad_intervention.status_code == 400
+        for forbidden_payload in (
+            {"needs": {"energy": 100}},
+            {"development": {"language_communication": {"score": 100}}},
+            {"traits": {"temperament_baseline": "直接改写"}},
+        ):
+            bad_intervention = await client.post(
+                f"/api/worlds/{world_id}/interventions",
+                json={"intervention_type": "gm_event", "payload": forbidden_payload},
+            )
+            assert bad_intervention.status_code == 400
 
         good_intervention = await client.post(
             f"/api/worlds/{world_id}/interventions",
-            json={"intervention_type": "adult_behavior", "payload": {"text": "照护者今天用更慢的节奏完成入园过渡。"}},
+            json={
+                "intervention_type": "npc_behavior",
+                "payload": {
+                    "text": "老师今天在入园时蹲下来提醒，引导小禾加入积木活动。",
+                    "location_id": kindergarten_location_id,
+                    "target_role": "teacher",
+                    "activity_goal": "积木合作活动",
+                    "guidance_style": "蹲下来分步骤提示",
+                },
+            },
         )
         assert good_intervention.status_code == 200
 
@@ -98,9 +113,50 @@ async def test_child_growth_draft_confirm_step_report_and_replay(tmp_path) -> No
         assert "Deterministic fallback" not in first_event["payload"]["gm_interpretation"]
         assert first_event["payload"]["state_update_evidence"]
         assert first_event["payload"]["half_day_summary"]
+        assert first_event["location_id"] == kindergarten_location_id
+        assert first_event["payload"]["main_action"] == "积木合作活动"
+        assert "积木合作活动" in first_event["payload"]["action_text"]
+        assert first_event["payload"]["intervention_plan"]["target_role"] == "teacher"
+        assert first_event["payload"]["intervention_plan"]["activity_goal"] == "积木合作活动"
+        assert first_event["payload"]["intervention_plan"]["location_id"] == kindergarten_location_id
+        assert "积木合作活动" in first_event["payload"]["intervention_effect_summary"]
+        first_slice = first_event["payload"]["life_slice"]
+        assert first_slice["scene_description"]
+        assert 10 <= len(first_slice["dialogue"]) <= 20
+        slice_text = first_slice["scene_description"] + "\n" + "\n".join(f"{turn['speaker']}：{turn['text']}" for turn in first_slice["dialogue"])
+        assert "老师" in slice_text or "林老师" in slice_text
+        assert "积木" in slice_text
+        assert "照护者" not in slice_text
+        child_summaries = first_step.json()["state"]["child"]["half_day_summaries"]
+        assert child_summaries[-1]["life_slice"]["dialogue"]
+        interventions_after_first_step = await client.get(f"/api/worlds/{world_id}/interventions")
+        assert interventions_after_first_step.json()[0]["status"] == "applied"
+        assert interventions_after_first_step.json()[0]["result_event_id"] == first_event["id"]
+
+        location_override = await client.post(
+            f"/api/worlds/{world_id}/interventions",
+            json={
+                "intervention_type": "environment_event",
+                "payload": {
+                    "text": "上午的教室材料还需要老师带小禾补一次整理。",
+                    "location_id": kindergarten_location_id,
+                    "target_role": "teacher",
+                    "activity_goal": "教室整理材料",
+                },
+            },
+        )
+        assert location_override.status_code == 200
+
+        second_step = await client.post(f"/api/worlds/{world_id}/step")
+        assert second_step.status_code == 200
+        second_event = second_step.json()["events"][0]
+        assert second_step.json()["world"]["tick_no"] == 2
+        assert second_event["location_id"] == kindergarten_location_id
+        assert second_event["payload"]["main_action"] == "教室整理材料"
+        assert second_event["payload"]["intervention_plan"]["scene"] == "kindergarten"
 
         home_summaries: list[str] = []
-        for _ in range(13):
+        for _ in range(12):
             step_resp = await client.post(f"/api/worlds/{world_id}/step")
             assert step_resp.status_code == 200
             event_payload = step_resp.json()["events"][0]["payload"]

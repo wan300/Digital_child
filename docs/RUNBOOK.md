@@ -25,7 +25,7 @@ uv run pytest tests/test_simulation_*.py
 
 最小 API 路径：
 
-1. 登录获取管理员 token。
+1. 直接调用 API。当前本地运行已关闭登录/JWT，不需要 `Authorization` header。
 2. `POST /api/worlds` 创建 world。
 3. `POST /api/worlds/{id}/locations` 创建至少一个地点。
 4. `POST /api/worlds/{id}/agents` 绑定已有 Persona。

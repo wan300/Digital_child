@@ -13,6 +13,7 @@ OUTCOME_SCHEMA_KEYS = (
     "gm_interpretation",
     "state_update_evidence",
     "half_day_summary",
+    "life_slice",
     "suggested_updates",
     "risk_flags",
     "state_changes",
@@ -34,9 +35,12 @@ def build_resolution_prompt(context: dict[str, Any], action_text: str) -> str:
         "gm_interpretation, observed_facts, and evidence in Simplified Chinese.\n"
         "For child_growth_v1, never directly set development scores or rewrite the whole child state; provide evidence and "
         "suggested_updates only, because the backend rules clamp final needs, development, and relationships.\n"
-        "Keep JSON concise: at most 3 sub_fragments, 4 observed_facts, 4 state_update_evidence entries, "
+        "Keep JSON concise except life_slice.dialogue: at most 3 sub_fragments, 4 observed_facts, 4 state_update_evidence entries, "
         "3 development_evidence items, 3 relationship_evidence items, and 2 memory_writes. "
         "Each string should be one short sentence unless the field explicitly asks for a 1-3 sentence summary.\n"
+        "For child_growth_v1, include life_slice as a concrete half-day scene centered on the child: "
+        "one scene_description and 10-20 age-appropriate dialogue turns. Use caregiver display labels from context, "
+        "such as 爸爸 or 妈妈, instead of generic labels like 照护者. Do not mention metrics, scores, or GM reasoning in life_slice.\n"
         "Return only one valid JSON object with these keys: "
         f"{', '.join(OUTCOME_SCHEMA_KEYS)}.\n"
         "Use this JSON shape exactly:\n"
@@ -50,6 +54,7 @@ def build_resolution_prompt(context: dict[str, Any], action_text: str) -> str:
         '  "gm_interpretation": "GM explanation of meaning and recovery path",\n'
         '  "state_update_evidence": [{"field": "needs.energy", "reason": "observable evidence"}],\n'
         '  "half_day_summary": "1-3 sentence half-day summary",\n'
+        '  "life_slice": {"scene_description": "brief concrete scene", "dialogue": [{"speaker": "child or participant display label", "text": "spoken line"}]},\n'
         '  "suggested_updates": {"development_evidence": [], "relationship_evidence": []},\n'
         '  "risk_flags": [],\n'
         '  "state_changes": {"agent_id": "...", "current_location_id": "...", "current_action": "..."},\n'
