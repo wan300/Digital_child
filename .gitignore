@@ -23,6 +23,11 @@ tmp/
 *.db
 *.sqlite
 *.sqlite3
+*.bak
+*.old
+*.orig
+*.tmp
+*~
 frontend/.vite/
 backend/.venv/
 backend/htmlcov/

@@ -927,11 +927,14 @@ function ChildInspector({ state }: { state: WorldStateProjection }) {
       <div className="development-grid">
         {Object.entries(child.development).map(([key, value]) => {
           const row = asRecord(value);
+          const recentDelta = numericValue(row.recent_delta, 0);
+          const evidenceCount = metricNumber(row.evidence_count);
+          const recentConfidence = numericValue(row.recent_confidence, numericValue(row.confidence, 0.35));
           return (
             <article key={key}>
               <strong>{developmentLabel(key)}</strong>
               <Progress value={metricNumber(row.score)} />
-              <small>{safeString(row.trend || "stable")} · confidence {formatNumber(row.confidence)}</small>
+              <small>近14步 {formatSignedNumber(recentDelta)} · 证据 {evidenceCount} · 近期置信 {formatNumber(recentConfidence)}</small>
             </article>
           );
         })}
@@ -1406,6 +1409,11 @@ function metricNumber(value: unknown): number {
   return typeof value === "number" ? Math.round(value) : Number(value) || 0;
 }
 
+function numericValue(value: unknown, fallback = 0): number {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+}
+
 function safeString(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value;
@@ -1415,6 +1423,11 @@ function safeString(value: unknown): string {
 
 function formatNumber(value: unknown): string {
   return typeof value === "number" ? value.toFixed(2) : safeString(value || "0.00");
+}
+
+function formatSignedNumber(value: unknown): string {
+  const numberValue = numericValue(value, 0);
+  return `${numberValue > 0 ? "+" : ""}${numberValue.toFixed(1)}`;
 }
 
 function formatDateTime(value: string) {

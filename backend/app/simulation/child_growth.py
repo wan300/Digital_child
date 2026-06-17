@@ -110,7 +110,18 @@ def default_needs() -> dict[str, int]:
 def default_development(age_months: int) -> dict[str, dict[str, Any]]:
     base = 48 + min(12, max(0, age_months - 36) // 3)
     return {
-        key: {"score": clamp(base + offset, 0, 100), "trend": "stable", "evidence_buffer": [], "confidence": 0.55}
+        key: {
+            "score": clamp(base + offset, 0, 100),
+            "trend": "stable",
+            "evidence_buffer": [],
+            "confidence": 0.55,
+            "recent_delta": 0.0,
+            "recent_trend": "stable",
+            "recent_confidence": 0.35,
+            "evidence_count": 0,
+            "positive_evidence_count": 0,
+            "negative_evidence_count": 0,
+        }
         for key, offset in {
             "language_communication": 2,
             "cognitive_attention": 1,
@@ -128,6 +139,10 @@ def clamp(value: float | int, low: int = 0, high: int = 100) -> int:
 
 def clamp_delta(value: float, low: int, high: int) -> int:
     return max(low, min(high, int(round(value))))
+
+
+def clamp_float(value: float | int, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
 
 
 def safe_memory_text(value: Any) -> str:
@@ -642,6 +657,12 @@ class ChildWorldDraftService:
                 "trend": str(row.get("trend") or "stable"),
                 "evidence_buffer": row.get("evidence_buffer") if isinstance(row.get("evidence_buffer"), list) else [],
                 "confidence": max(0, min(1, float(row.get("confidence") or normalized[key]["confidence"]))),
+                "recent_delta": float(row.get("recent_delta") or normalized[key]["recent_delta"]),
+                "recent_trend": str(row.get("recent_trend") or normalized[key]["recent_trend"]),
+                "recent_confidence": max(0, min(1, float(row.get("recent_confidence") or normalized[key]["recent_confidence"]))),
+                "evidence_count": int(row.get("evidence_count") or 0),
+                "positive_evidence_count": int(row.get("positive_evidence_count") or 0),
+                "negative_evidence_count": int(row.get("negative_evidence_count") or 0),
             }
         return normalized
 
@@ -1384,7 +1405,13 @@ class ChildGrowthStepper:
                 involved_relationships=involved_relationships,
                 intervention_plan=intervention_plan,
             )
-            suggested_updates = self._fallback_suggested_updates(schedule=schedule, involved_relationships=involved_relationships)
+            suggested_updates = self._fallback_suggested_updates(
+                schedule=schedule,
+                involved_relationships=involved_relationships,
+                random_event=random_event,
+                interventions=interventions,
+                intervention_plan=intervention_plan,
+            )
             life_slice = deterministic_life_slice
         else:
             observed = raw.get("observed_facts") if isinstance(raw.get("observed_facts"), list) else []
@@ -1415,7 +1442,13 @@ class ChildGrowthStepper:
                 )
             suggested_updates = raw.get("suggested_updates") if isinstance(raw.get("suggested_updates"), dict) else {}
             if not suggested_updates:
-                suggested_updates = self._fallback_suggested_updates(schedule=schedule, involved_relationships=involved_relationships)
+                suggested_updates = self._fallback_suggested_updates(
+                    schedule=schedule,
+                    involved_relationships=involved_relationships,
+                    random_event=random_event,
+                    interventions=interventions,
+                    intervention_plan=intervention_plan,
+                )
             life_slice = self._normalize_life_slice(raw.get("life_slice"), deterministic_life_slice, child=child, involved_actors=involved_actors)
         half_day_summary = self._replace_generic_caregiver(half_day_summary, child=child, involved_actors=involved_actors)
         child_interpretation = self._replace_generic_caregiver(child_interpretation, child=child, involved_actors=involved_actors)
@@ -1724,12 +1757,75 @@ class ChildGrowthStepper:
             return [*evidence[:4], plan_evidence]
         return evidence[:5]
 
-    def _fallback_suggested_updates(self, *, schedule: dict[str, Any], involved_relationships: list[AgentRelationship]) -> dict[str, Any]:
+    def _fallback_suggested_updates(
+        self,
+        *,
+        schedule: dict[str, Any],
+        involved_relationships: list[AgentRelationship],
+        random_event: RandomEventTemplate | None,
+        interventions: list[dict[str, Any]],
+        intervention_plan: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        development_evidence: list[dict[str, Any]] = []
+        for index, domain in enumerate(schedule.get("domains", [])):
+            if domain not in DEVELOPMENT_DOMAINS:
+                continue
+            role = "primary" if index == 0 else "secondary"
+            development_evidence.append(
+                {
+                    "domain": domain,
+                    "role": role,
+                    "impact": 0.6 if role == "primary" else 0.3,
+                    "source": "half_day_schedule",
+                    "reason": "half-day activity evidence",
+                }
+            )
+        if random_event is not None:
+            event_domains = self._domains_from_value((random_event.trigger or {}).get("domains"))
+            event_text = f"{random_event.name} {random_event.effect_prompt}"
+            is_challenge = random_event.severity == "warning" or self._has_challenge_text(event_text)
+            for domain in event_domains:
+                development_evidence.append(
+                    {
+                        "domain": domain,
+                        "role": "challenge" if is_challenge else "support",
+                        "impact": -0.6 if is_challenge else 0.5,
+                        "source": "random_event",
+                        "reason": event_text,
+                    }
+                )
+        if intervention_plan is not None:
+            intervention_text = " ".join(
+                str(intervention_plan.get(key) or "")
+                for key in ("text", "activity_goal", "guidance_style", "target_role")
+            )
+            is_challenge = self._has_challenge_text(intervention_text)
+            domains = list(self._keyword_domain_impacts(intervention_text).keys()) or list(schedule.get("domains", []))[:2]
+            for index, domain in enumerate(domain for domain in domains if domain in DEVELOPMENT_DOMAINS):
+                development_evidence.append(
+                    {
+                        "domain": domain,
+                        "role": "challenge" if is_challenge else ("primary" if index == 0 else "secondary"),
+                        "impact": -0.7 if is_challenge else (0.8 if index == 0 else 0.4),
+                        "source": "intervention_plan",
+                        "reason": intervention_text or "observer intervention",
+                    }
+                )
+        elif interventions:
+            intervention_text = safe_memory_text(interventions[0].get("text"))
+            is_challenge = self._has_challenge_text(intervention_text)
+            for domain in self._keyword_domain_impacts(intervention_text):
+                development_evidence.append(
+                    {
+                        "domain": domain,
+                        "role": "challenge" if is_challenge else "support",
+                        "impact": -0.6 if is_challenge else 0.4,
+                        "source": "observer_intervention",
+                        "reason": intervention_text,
+                    }
+                )
         return {
-            "development_evidence": [
-                {"domain": domain, "direction": "evidence_only", "reason": "半天活动提供观察证据，分数等待 14 step 结算。"}
-                for domain in schedule.get("domains", [])
-            ],
+            "development_evidence": development_evidence,
             "relationship_evidence": [
                 {"relationship_id": relationship.id, "type": relationship.relationship_type, "direction": "evidence_only"}
                 for relationship in involved_relationships
@@ -1859,45 +1955,279 @@ class ChildGrowthStepper:
             delta = {"energy": 6 if half_index == 1 else -4, "satiety": 8, "sleep_quality": 4 if half_index == 1 else 0, "health": 0, "hygiene": 6, "safety": 5, "stress": -5}
         return {key: clamp(current[key] + delta[key]) for key in NEED_KEYS}
 
+    def _domains_from_value(self, value: Any) -> list[str]:
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, list | tuple | set):
+            values = [str(item) for item in value]
+        else:
+            values = []
+        domains: list[str] = []
+        for item in values:
+            if item in DEVELOPMENT_DOMAINS and item not in domains:
+                domains.append(item)
+        return domains
+
+    def _has_challenge_text(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            token in lowered
+            for token in (
+                "challenge",
+                "conflict",
+                "tired",
+                "fatigue",
+                "stress",
+                "upset",
+                "fall",
+                "hurt",
+                "refuse",
+                "frustrated",
+                "冲突",
+                "分歧",
+                "疲惫",
+                "不舒服",
+                "压力",
+                "摔",
+                "哭",
+                "拒绝",
+                "害怕",
+                "失落",
+                "挫折",
+            )
+        )
+
+    def _keyword_domain_impacts(self, text: str) -> dict[str, float]:
+        lowered = text.lower()
+        keyword_map: dict[str, tuple[str, ...]] = {
+            "language_communication": ("language", "talk", "speak", "share", "question", "answer", "表达", "说", "讲", "分享", "提问", "回答", "沟通"),
+            "cognitive_attention": ("attention", "focus", "rule", "observe", "sort", "puzzle", "注意", "专注", "规则", "观察", "分类", "拼图", "积木", "整理"),
+            "motor_ability": ("motor", "move", "movement", "run", "jump", "music", "stop", "outdoor", "运动", "跑", "跳", "音乐", "停", "身体", "户外", "攀爬"),
+            "emotional_regulation": ("emotion", "wait", "separation", "comfort", "stress", "tired", "conflict", "情绪", "等待", "分离", "安抚", "压力", "疲惫", "冲突", "不舒服", "害怕"),
+            "social_cooperation": ("social", "peer", "cooperate", "turn", "invite", "friend", "同伴", "合作", "轮流", "邀请", "朋友", "一起", "分享", "冲突"),
+            "self_care_habits": ("self care", "wash", "clean", "dress", "meal", "sleep", "hygiene", "洗手", "整理", "穿", "用餐", "吃饭", "睡前", "作息", "卫生", "自理"),
+        }
+        impacts: dict[str, float] = {}
+        is_challenge = self._has_challenge_text(text)
+        for domain, keywords in keyword_map.items():
+            if any(keyword in lowered for keyword in keywords):
+                impacts[domain] = -0.45 if is_challenge and domain in {"emotional_regulation", "social_cooperation", "self_care_habits"} else 0.25
+        return impacts
+
+    def _impact_from_evidence(self, item: dict[str, Any], *, default: float = 0.3) -> float:
+        raw_impact = item.get("impact")
+        if isinstance(raw_impact, int | float):
+            return clamp_float(raw_impact, -0.9, 0.9)
+        role = str(item.get("role") or "").lower()
+        direction = str(item.get("direction") or "").lower()
+        source = str(item.get("source") or "").lower()
+        text = " ".join(str(item.get(key) or "") for key in ("reason", "detail", "evidence"))
+        if role == "challenge" or direction in {"down", "negative", "challenge"} or self._has_challenge_text(text):
+            return -0.6
+        if source == "intervention_plan":
+            return 0.8
+        if role == "primary":
+            return 0.6
+        if role == "secondary":
+            return 0.3
+        if role == "support":
+            return 0.5
+        return default
+
+    def _development_evidence_items(self, outcome: dict[str, Any], *, tick_no: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        suggested = outcome.get("suggested_updates") if isinstance(outcome.get("suggested_updates"), dict) else {}
+        suggested_rows = suggested.get("development_evidence") if isinstance(suggested.get("development_evidence"), list) else []
+        for row in suggested_rows:
+            if not isinstance(row, dict):
+                continue
+            domains = self._domains_from_value(row.get("domain")) or self._domains_from_value(row.get("domains"))
+            for domain in domains:
+                impact = self._impact_from_evidence(row, default=0.45)
+                items.append(
+                    {
+                        "tick_no": tick_no,
+                        "domain": domain,
+                        "impact": impact,
+                        "direction": "down" if impact < 0 else "up",
+                        "source": str(row.get("source") or "suggested_updates"),
+                        "role": str(row.get("role") or row.get("direction") or "evidence"),
+                        "evidence": str(row.get("reason") or row.get("detail") or outcome.get("half_day_summary") or ""),
+                    }
+                )
+        state_rows = outcome.get("state_update_evidence") if isinstance(outcome.get("state_update_evidence"), list) else []
+        for row in state_rows:
+            if not isinstance(row, dict):
+                continue
+            source = str(row.get("source") or "state_update_evidence")
+            if suggested_rows and source in {"half_day_schedule", "observed_fragments"}:
+                continue
+            domains = self._domains_from_value(row.get("domain")) or self._domains_from_value(row.get("domains"))
+            for index, domain in enumerate(domains):
+                fallback = 0.6 if index == 0 and not suggested_rows else 0.3
+                impact = self._impact_from_evidence(row, default=fallback)
+                items.append(
+                    {
+                        "tick_no": tick_no,
+                        "domain": domain,
+                        "impact": impact,
+                        "direction": "down" if impact < 0 else "up",
+                        "source": source,
+                        "role": str(row.get("role") or ("primary" if index == 0 else "secondary")),
+                        "evidence": str(row.get("detail") or row.get("reason") or outcome.get("half_day_summary") or ""),
+                    }
+                )
+        text = " ".join(
+            [
+                str(outcome.get("main_action") or ""),
+                str(outcome.get("half_day_summary") or ""),
+                str(outcome.get("gm_interpretation") or ""),
+                *[str(item) for item in outcome.get("observed_facts", []) if item],
+            ]
+        )
+        for domain, impact in self._keyword_domain_impacts(text).items():
+            items.append(
+                {
+                    "tick_no": tick_no,
+                    "domain": domain,
+                    "impact": impact,
+                    "direction": "down" if impact < 0 else "up",
+                    "source": "keyword_signal",
+                    "role": "challenge" if impact < 0 else "support",
+                    "evidence": str(outcome.get("half_day_summary") or outcome.get("main_action") or ""),
+                }
+            )
+        return self._merge_development_evidence(items)
+
+    def _merge_development_evidence(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for item in items:
+            domain = str(item.get("domain") or "")
+            if domain not in DEVELOPMENT_DOMAINS:
+                continue
+            current = merged.setdefault(
+                domain,
+                {
+                    "tick_no": item.get("tick_no"),
+                    "domain": domain,
+                    "impact": 0.0,
+                    "sources": [],
+                    "roles": [],
+                    "evidence": [],
+                },
+            )
+            current["impact"] = clamp_float(float(current["impact"]) + float(item.get("impact") or 0), -0.9, 0.9)
+            source = str(item.get("source") or "")
+            if source and source not in current["sources"]:
+                current["sources"].append(source)
+            role = str(item.get("role") or "")
+            if role and role not in current["roles"]:
+                current["roles"].append(role)
+            evidence = str(item.get("evidence") or "")
+            if evidence and evidence not in current["evidence"]:
+                current["evidence"].append(evidence[:180])
+        rows: list[dict[str, Any]] = []
+        for item in merged.values():
+            impact = round(float(item["impact"]), 2)
+            if abs(impact) < 0.05:
+                continue
+            rows.append(
+                {
+                    "tick_no": item["tick_no"],
+                    "domain": item["domain"],
+                    "impact": impact,
+                    "direction": "down" if impact < 0 else "up",
+                    "source": "+".join(item["sources"]) or "development_evidence",
+                    "role": "+".join(item["roles"]) or "evidence",
+                    "evidence": " / ".join(item["evidence"][:3]),
+                }
+            )
+        return rows
+
+    def _development_recent_metrics(self, evidence: list[Any]) -> dict[str, Any]:
+        rows = [item for item in evidence if isinstance(item, dict)]
+        impacts = [float(item.get("impact") or 0) for item in rows]
+        total = round(clamp_float(sum(impacts), -6, 6), 1)
+        positive_count = sum(1 for impact in impacts if impact > 0.05)
+        negative_count = sum(1 for impact in impacts if impact < -0.05)
+        evidence_count = len(rows)
+        sources = {str(item.get("source") or "") for item in rows if item.get("source")}
+        if total > 0.4:
+            recent_trend = "up"
+        elif total < -0.4:
+            recent_trend = "down"
+        else:
+            recent_trend = "stable"
+        if evidence_count == 0:
+            recent_confidence = 0.35
+        else:
+            consistency = max(positive_count, negative_count) / evidence_count if evidence_count else 0
+            mixed_penalty = 0.05 if positive_count and negative_count else 0
+            recent_confidence = clamp_float(
+                0.35
+                + min(evidence_count, 8) * 0.045
+                + min(len(sources), 3) * 0.04
+                + min(abs(total) / 6, 1) * 0.12
+                + consistency * 0.08
+                - mixed_penalty,
+                0.35,
+                0.95,
+            )
+        return {
+            "recent_delta": total,
+            "recent_trend": recent_trend,
+            "recent_confidence": round(recent_confidence, 2),
+            "evidence_count": evidence_count,
+            "positive_evidence_count": positive_count,
+            "negative_evidence_count": negative_count,
+        }
+
     def _updated_development(self, development: dict[str, Any], *, outcome: dict[str, Any], tick_no: int) -> dict[str, dict[str, Any]]:
         normalized: dict[str, dict[str, Any]] = {}
-        text = " ".join([outcome["half_day_summary"], *outcome["observed_facts"], outcome["gm_interpretation"]])
-        for key, label in DEVELOPMENT_DOMAINS.items():
+        evidence_by_domain = {item["domain"]: item for item in self._development_evidence_items(outcome, tick_no=tick_no)}
+        for key in DEVELOPMENT_DOMAINS:
             row = development.get(key) if isinstance(development.get(key), dict) else {}
             buffer = list(row.get("evidence_buffer") or [])
-            impact = 0.15
-            if label[:2] in text or key in str(outcome.get("suggested_updates")):
-                impact = 0.35
-            if "冲突" in text and key in {"emotional_regulation", "social_cooperation"}:
-                impact = 0.2
-            buffer.append({"tick_no": tick_no, "label": label, "impact": impact, "evidence": outcome["half_day_summary"]})
+            if key in evidence_by_domain:
+                buffer.append(evidence_by_domain[key])
+            buffer = buffer[-14:]
+            metrics = self._development_recent_metrics(buffer)
+            old_confidence = max(0.35, min(0.95, float(row.get("confidence") or 0.55)))
+            confidence = (
+                round(clamp_float(old_confidence * 0.9 + metrics["recent_confidence"] * 0.1, 0.35, 0.95), 2)
+                if metrics["evidence_count"]
+                else old_confidence
+            )
             normalized[key] = {
                 "score": clamp(row.get("score", 50)),
                 "trend": str(row.get("trend") or "stable"),
-                "evidence_buffer": buffer[-14:],
-                "confidence": max(0, min(1, float(row.get("confidence") or 0.55))),
+                "evidence_buffer": buffer,
+                "confidence": confidence,
+                **metrics,
             }
         return normalized
 
     def _settle_development(self, development: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         settled: dict[str, dict[str, Any]] = {}
         for key, row in development.items():
-            evidence = row.get("evidence_buffer") or []
-            total = sum(float(item.get("impact") or 0) for item in evidence if isinstance(item, dict))
+            evidence = list(row.get("evidence_buffer") or [])[-14:]
+            metrics = self._development_recent_metrics(evidence)
+            total = float(metrics["recent_delta"])
             score = clamp(row.get("score", 50))
-            raw_delta = 1 if total >= 2.6 else (-1 if total <= -1.0 else 0)
+            raw_delta = 2 if total >= 5.0 else (1 if total >= 2.8 else (-2 if total <= -5.0 else (-1 if total <= -2.8 else 0)))
             if score >= 82 and raw_delta > 0:
-                raw_delta = 0
+                raw_delta = min(raw_delta, 1)
             if score <= 35 and raw_delta < 0:
-                raw_delta = 0
+                raw_delta = max(raw_delta, -1)
             new_score = clamp(score + raw_delta)
             settled[key] = {
                 **row,
                 "score": new_score,
                 "trend": "up" if raw_delta > 0 else ("down" if raw_delta < 0 else "stable"),
-                "evidence_buffer": [],
-                "confidence": max(0.55, min(0.95, float(row.get("confidence") or 0.55) + 0.02)),
+                "evidence_buffer": evidence,
+                **metrics,
                 "last_settlement_delta": raw_delta,
+                "last_settlement_total": total,
             }
         return settled
 
@@ -1965,7 +2295,16 @@ class ChildGrowthStepper:
             "major_experiences": [event.payload.get("half_day_summary") or event.payload.get("summary") for event in events if event.payload.get("half_day_summary") or event.payload.get("summary")][-6:],
             "emotional_patterns": "本周以温和日常适应为主，压力和安全感随场景转换小幅波动。",
             "development_trends": {
-                key: {"label": DEVELOPMENT_DOMAINS[key], "score": row.get("score"), "trend": row.get("trend"), "delta": row.get("last_settlement_delta", 0)}
+                key: {
+                    "label": DEVELOPMENT_DOMAINS[key],
+                    "score": row.get("score"),
+                    "trend": row.get("trend"),
+                    "delta": row.get("last_settlement_delta", 0),
+                    "recent_delta": row.get("recent_delta", 0),
+                    "recent_trend": row.get("recent_trend", "stable"),
+                    "recent_confidence": row.get("recent_confidence", row.get("confidence", 0.35)),
+                    "evidence_count": row.get("evidence_count", 0),
+                }
                 for key, row in (state.metadata_.get("development") or {}).items()
                 if key in DEVELOPMENT_DOMAINS
             },
