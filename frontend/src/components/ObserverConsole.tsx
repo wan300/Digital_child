@@ -5,25 +5,34 @@ import {
   BarChart3,
   BookOpen,
   Brain,
+  CheckCircle2,
   Clock3,
   Eye,
   FileClock,
+  FileVideo,
   Home,
+  Image as ImageIcon,
   Map as MapIcon,
   Pause,
   Play,
   RefreshCw,
   School,
   Send,
+  ShieldAlert,
   Sparkles,
   StepForward,
+  Trash2,
   Trees,
+  UploadCloud,
   Users
 } from "lucide-react";
 import { ApiError, worldApi } from "../api";
 import type {
   AgentRelationship,
   BranchPreview,
+  ChildObservationAnalysisJob,
+  ChildObservationDraft,
+  ChildObservationMediaAsset,
   ChildWorldDraft,
   GrowthReport,
   SimulationEvent,
@@ -38,6 +47,9 @@ import { EmptyState } from "./EmptyState";
 const DEFAULT_STEP_SECONDS = 5;
 const STEP_RECOVERY_TTL_MS = 180_000;
 const OBSERVER_RUNTIME_STORAGE_PREFIX = "child-growth-observer-runtime:";
+const OBSERVATION_JOB_STORAGE_KEY = "child-observation:selected-job-id";
+const MAX_OBSERVATION_UPLOAD_BYTES = 256 * 1024 * 1024;
+const ACTIVE_OBSERVATION_JOB_STATUSES = new Set(["queued", "running"]);
 
 type StoredStepState = {
   startedAt: number;
@@ -104,6 +116,30 @@ function clearStoredStep(worldId: string) {
   });
 }
 
+function readSelectedObservationJobId() {
+  try {
+    return window.localStorage.getItem(OBSERVATION_JOB_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSelectedObservationJobId(jobId: string) {
+  try {
+    window.localStorage.setItem(OBSERVATION_JOB_STORAGE_KEY, jobId);
+  } catch {
+    // Job selection persistence is only a refresh convenience.
+  }
+}
+
+function clearSelectedObservationJobId() {
+  try {
+    window.localStorage.removeItem(OBSERVATION_JOB_STORAGE_KEY);
+  } catch {
+    // Job selection persistence is only a refresh convenience.
+  }
+}
+
 function isFreshStepState(step: StoredStepState) {
   return Date.now() - step.startedAt < STEP_RECOVERY_TTL_MS;
 }
@@ -125,6 +161,7 @@ type DraftForm = {
   peer_count: number;
   natural_language_prompt: string;
   seed: number;
+  source_observation_draft_id: string | null;
 };
 
 export function ObserverConsole({
@@ -164,7 +201,8 @@ export function ObserverConsole({
     kindergarten_class: "星星班",
     peer_count: 2,
     natural_language_prompt: "喜欢积木和自然观察，入园时需要一点过渡时间。",
-    seed: 7
+    seed: 7,
+    source_observation_draft_id: null
   });
   const [activeDraft, setActiveDraft] = useState<ChildWorldDraft | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
@@ -475,6 +513,9 @@ export function ObserverConsole({
           onCreateDraft={createDraft}
           onConfirmDraft={confirmDraft}
           onSelectDraft={setActiveDraft}
+          token={token}
+          onNotice={setNotice}
+          onError={setError}
         />
       )}
 
@@ -536,7 +577,10 @@ function DraftPanel({
   busy,
   onCreateDraft,
   onConfirmDraft,
-  onSelectDraft
+  onSelectDraft,
+  token,
+  onNotice,
+  onError
 }: {
   form: DraftForm;
   setForm: (form: DraftForm) => void;
@@ -546,9 +590,262 @@ function DraftPanel({
   onCreateDraft: () => void;
   onConfirmDraft: (draft: ChildWorldDraft) => void;
   onSelectDraft: (draft: ChildWorldDraft | null) => void;
+  token: string;
+  onNotice: (message: string) => void;
+  onError: (message: string) => void;
 }) {
   const draft = activeDraft || drafts.find((item) => !item.created_world_id) || null;
   const child = asRecord(asRecord(draft?.parsed_draft).child);
+  const [mediaFiles, setMediaFiles] = useState<File[]>([]);
+  const [mediaAssets, setMediaAssets] = useState<ChildObservationMediaAsset[]>([]);
+  const [observationJobs, setObservationJobs] = useState<ChildObservationAnalysisJob[]>([]);
+  const [observationHistoryLoaded, setObservationHistoryLoaded] = useState(false);
+  const [observationJob, setObservationJob] = useState<ChildObservationAnalysisJob | null>(null);
+  const [observationDraft, setObservationDraft] = useState<ChildObservationDraft | null>(null);
+  const [observationDescription, setObservationDescription] = useState("");
+  const [observationBusy, setObservationBusy] = useState(false);
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
+  const [authorizationRationale, setAuthorizationRationale] = useState("");
+
+  const refreshObservationJobs = useCallback(async () => {
+    const jobs = await worldApi.observationAnalysisJobs(token, { status: "all", limit: 20 });
+    setObservationJobs(jobs);
+    return jobs;
+  }, [token]);
+
+  const loadObservationDraftForJob = useCallback(
+    async (job: ChildObservationAnalysisJob) => {
+      if (!job.observation_draft_id) {
+        setObservationDraft(null);
+        return null;
+      }
+      const nextDraft = await worldApi.observationDraft(token, job.observation_draft_id);
+      setObservationDraft(nextDraft);
+      setObservationDescription(nextDraft.accepted_child_description || nextDraft.generated_child_description || "");
+      setAuthorizationConfirmed(false);
+      setAuthorizationRationale("");
+      return nextDraft;
+    },
+    [token]
+  );
+
+  const selectObservationJob = useCallback(
+    async (job: ChildObservationAnalysisJob, options: { persist?: boolean; loadDraft?: boolean } = {}) => {
+      setObservationJob(job);
+      setObservationJobs((items) => upsertObservationJob(items, job));
+      if (options.persist !== false) writeSelectedObservationJobId(job.id);
+      if (options.loadDraft === false) return;
+      try {
+        await loadObservationDraftForJob(job);
+      } catch (err) {
+        onError(err instanceof Error ? err.message : "加载观察草稿失败");
+      }
+    },
+    [loadObservationDraftForJob, onError]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHistory = async () => {
+      try {
+        const jobs = await worldApi.observationAnalysisJobs(token, { status: "all", limit: 20 });
+        if (cancelled) return;
+        setObservationJobs(jobs);
+        setObservationHistoryLoaded(true);
+        const storedJobId = readSelectedObservationJobId();
+        const selectedJob = preferredObservationJob(jobs, storedJobId);
+        if (selectedJob) {
+          setObservationJob(selectedJob);
+          if (storedJobId !== selectedJob.id) writeSelectedObservationJobId(selectedJob.id);
+          if (selectedJob.observation_draft_id) {
+            await loadObservationDraftForJob(selectedJob);
+          }
+        } else {
+          setObservationJob(null);
+          setObservationDraft(null);
+          setObservationDescription("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setObservationHistoryLoaded(true);
+          onError(err instanceof Error ? err.message : "加载观察任务历史失败");
+        }
+      }
+    };
+    void loadHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadObservationDraftForJob, onError, token]);
+
+  useEffect(() => {
+    if (!observationJob || !isObservationJobActive(observationJob)) return;
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      void (async () => {
+        try {
+          const latest = await worldApi.observationAnalysisJob(token, observationJob.id);
+          if (cancelled) return;
+          setObservationJob(latest);
+          setObservationJobs((items) => upsertObservationJob(items, latest));
+          if (latest.observation_draft_id) await loadObservationDraftForJob(latest);
+          if (!isObservationJobActive(latest)) {
+            window.clearInterval(interval);
+            void refreshObservationJobs();
+            if (latest.status === "failed") {
+              onError(latest.error_message || "多模态观察分析失败");
+            } else {
+              onNotice("儿童描述已生成，请确认或编辑后填入模板。");
+            }
+          }
+        } catch (err) {
+          if (!cancelled) onError(err instanceof Error ? err.message : "刷新观察任务进度失败");
+        }
+      })();
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [loadObservationDraftForJob, observationJob?.id, observationJob?.status, onError, onNotice, refreshObservationJobs, token]);
+
+  const startObservationAnalysis = async () => {
+    if (!mediaFiles.length) return;
+    setObservationBusy(true);
+    onError("");
+    onNotice("");
+    try {
+      const draftSessionId = `draft-${Date.now()}`;
+      const uploadedAssets: ChildObservationMediaAsset[] = [];
+      const uploadErrors: string[] = [];
+      for (let index = 0; index < mediaFiles.length; index += 1) {
+        if (mediaFiles[index].size > MAX_OBSERVATION_UPLOAD_BYTES) {
+          uploadErrors.push(`${mediaFiles[index].name}: file exceeds ${formatBytes(MAX_OBSERVATION_UPLOAD_BYTES)} upload limit`);
+          continue;
+        }
+        onNotice(`正在上传媒体 ${index + 1}/${mediaFiles.length}`);
+        try {
+          const uploaded = await worldApi.uploadObservationMedia(token, [mediaFiles[index]], draftSessionId);
+          uploadedAssets.push(...uploaded.assets);
+          setMediaAssets([...uploadedAssets]);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "上传失败";
+          uploadErrors.push(`${mediaFiles[index].name}: ${message}`);
+        }
+      }
+      if (!uploadedAssets.length) throw new Error("没有媒体文件上传成功");
+      if (uploadErrors.length) onError(`部分媒体上传失败：${uploadErrors.join("；")}`);
+      const job = await worldApi.createObservationAnalysisJob(token, {
+        asset_ids: uploadedAssets.map((asset) => asset.id),
+        structured_setup: {
+          template_key: form.template_key,
+          child_display_name: form.child_name,
+          age_months: form.age_months,
+          caregiver_1_label: form.caregiver_1_label,
+          caregiver_2_label: form.caregiver_2_label,
+          kindergarten_class: form.kindergarten_class,
+          peer_count: form.peer_count,
+          natural_language_prompt: form.natural_language_prompt,
+          seed: form.seed
+        },
+        include_audio: true
+      });
+      writeSelectedObservationJobId(job.id);
+      setObservationJob(job);
+      setObservationJobs((items) => upsertObservationJob(items, job));
+      setObservationDraft(null);
+      setObservationDescription("");
+      onNotice("多模态分析已开始，正在抽帧、转写音频并汇总儿童描述。");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "多模态观察分析失败");
+    } finally {
+      setObservationBusy(false);
+    }
+  };
+
+  const acceptObservationDescription = async () => {
+    if (!observationDraft) return;
+    setObservationBusy(true);
+    onError("");
+    try {
+      const description = observationDescription.trim();
+      if (!description) throw new Error("请先确认或填写最终儿童描述。");
+      const response = await worldApi.acceptObservationDescription(token, observationDraft.id, {
+        description,
+        authorization_confirmation: {
+          confirmed: authorizationConfirmed,
+          authorization_scope: authorizationConfirmed ? ["validation_only"] : [],
+          risk_categories: observationDraft.risk_flags.map((flag) => safeString(asRecord(flag).category || "risk")),
+          operator_rationale: authorizationRationale,
+          retained_content_scope: "仅保留用户确认后的最终儿童描述"
+        }
+      });
+      setObservationDraft({
+        ...observationDraft,
+        status: response.status,
+        accepted_child_description: response.accepted_child_description,
+        raw_media_deleted_at: response.raw_media_deleted ? new Date().toISOString() : observationDraft.raw_media_deleted_at,
+        preview_refs: response.raw_media_deleted ? [] : observationDraft.preview_refs
+      });
+      setForm({ ...form, natural_language_prompt: response.accepted_child_description, source_observation_draft_id: observationDraft.id });
+      setMediaAssets((items) => items.map((asset) => ({ ...asset, status: response.raw_media_deleted ? "deleted" : asset.status, preview_refs: response.raw_media_deleted ? [] : asset.preview_refs })));
+      onNotice(response.raw_media_deleted ? "最终儿童描述已确认并填入模板，原始媒体和预览已删除。" : "最终儿童描述已确认并填入模板。");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "确认儿童描述失败");
+    } finally {
+      setObservationBusy(false);
+    }
+  };
+
+  const rejectObservationDraft = async () => {
+    if (!observationDraft) return;
+    setObservationBusy(true);
+    onError("");
+    try {
+      const response = await worldApi.rejectObservationDraft(token, observationDraft.id, "操作者拒绝该观察草稿");
+      setObservationDraft({ ...observationDraft, status: response.status, raw_media_deleted_at: response.raw_media_deleted ? new Date().toISOString() : observationDraft.raw_media_deleted_at, preview_refs: [] });
+      setMediaAssets((items) => items.map((asset) => ({ ...asset, status: response.raw_media_deleted ? "deleted" : asset.status, preview_refs: [] })));
+      onNotice("观察草稿已拒绝，原始媒体和预览已删除。");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "拒绝观察草稿失败");
+    } finally {
+      setObservationBusy(false);
+    }
+  };
+
+  const deleteObservationHistoryJob = async (job: ChildObservationAnalysisJob) => {
+    if (isObservationJobActive(job)) {
+      onError("正在运行的观察任务不能删除。");
+      return;
+    }
+    const confirmed = window.confirm("删除该观察任务历史？未提交审核的儿童描述草稿和关联媒体会一并清理。已确认或已转换的草稿不会被删除。");
+    if (!confirmed) return;
+    setObservationBusy(true);
+    onError("");
+    try {
+      await worldApi.deleteObservationAnalysisJob(token, job.id);
+      const jobs = await refreshObservationJobs();
+      if (observationJob?.id === job.id) {
+        setObservationJob(null);
+        setObservationDraft(null);
+        setObservationDescription("");
+        setMediaAssets([]);
+        clearSelectedObservationJobId();
+        const nextJob = preferredObservationJob(jobs, "");
+        if (nextJob) {
+          setObservationJob(nextJob);
+          writeSelectedObservationJobId(nextJob.id);
+          if (nextJob.observation_draft_id) await loadObservationDraftForJob(nextJob);
+        }
+      }
+      onNotice("观察任务历史已删除，未提交审核的草稿和关联媒体已清理。");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "删除观察任务历史失败");
+    } finally {
+      setObservationBusy(false);
+    }
+  };
+
   return (
     <section className="panel child-draft-panel">
       <div className="panel-heading">
@@ -600,9 +897,63 @@ function DraftPanel({
       </div>
       <textarea
         value={form.natural_language_prompt}
-        onChange={(event) => setForm({ ...form, natural_language_prompt: event.target.value })}
+        onChange={(event) => setForm({ ...form, natural_language_prompt: event.target.value, source_observation_draft_id: null })}
         placeholder="只描述抽象特征，不输入真实儿童姓名、照片、病历、真实学校班级等可识别信息。"
       />
+      <section className="observation-workflow">
+        <div className="observation-toolbar">
+          <label className="file-picker">
+            <UploadCloud size={16} />
+            <span>{mediaFiles.length ? `${mediaFiles.length} 个媒体文件` : "选择图片/视频"}</span>
+            <input
+              type="file"
+              multiple
+              accept="image/*,video/*"
+              onChange={(event) => setMediaFiles(Array.from(event.target.files || []))}
+            />
+          </label>
+          <button onClick={startObservationAnalysis} disabled={observationBusy || !mediaFiles.length}>
+            <Sparkles size={16} />
+            {observationBusy ? "处理中" : "生成儿童描述"}
+          </button>
+        </div>
+        {mediaAssets.length > 0 && (
+          <div className="media-asset-list">
+            {mediaAssets.map((asset) => (
+              <article key={asset.id}>
+                {asset.media_type === "video" ? <FileVideo size={16} /> : <ImageIcon size={16} />}
+                <div>
+                  <strong>{asset.original_filename}</strong>
+                  <small>{asset.status} · {formatBytes(asset.size_bytes)}</small>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        <ObservationJobHistory
+          jobs={observationJobs}
+          loaded={observationHistoryLoaded}
+          selectedJobId={observationJob?.id || ""}
+          onSelect={(job) => void selectObservationJob(job)}
+          onDelete={(job) => void deleteObservationHistoryJob(job)}
+          busy={observationBusy}
+        />
+        {observationJob && <ObservationJobStatus job={observationJob} />}
+        {observationDraft && (
+          <ObservationDraftReview
+            draft={observationDraft}
+            description={observationDescription}
+            authorizationConfirmed={authorizationConfirmed}
+            authorizationRationale={authorizationRationale}
+            busy={observationBusy}
+            onDescriptionChange={setObservationDescription}
+            onAuthorizationConfirmedChange={setAuthorizationConfirmed}
+            onAuthorizationRationaleChange={setAuthorizationRationale}
+            onAccept={acceptObservationDescription}
+            onReject={rejectObservationDraft}
+          />
+        )}
+      </section>
       <div className="inline">
         <button className="primary" onClick={onCreateDraft} disabled={busy}>
           <Sparkles size={16} />
@@ -637,6 +988,198 @@ function DraftPanel({
         </article>
       )}
     </section>
+  );
+}
+
+function ObservationJobHistory({
+  jobs,
+  loaded,
+  selectedJobId,
+  onSelect,
+  onDelete,
+  busy
+}: {
+  jobs: ChildObservationAnalysisJob[];
+  loaded: boolean;
+  selectedJobId: string;
+  onSelect: (job: ChildObservationAnalysisJob) => void;
+  onDelete: (job: ChildObservationAnalysisJob) => void;
+  busy: boolean;
+}) {
+  const rows = jobs.slice(0, 20);
+  return (
+    <div className="observation-job-history">
+      <div className="observation-history-heading">
+        <strong>观察任务历史/进度</strong>
+        <small>{loaded ? `最近 ${rows.length} 个任务` : "正在加载任务历史..."}</small>
+      </div>
+      {!rows.length && loaded && <small className="muted">暂无多模态观察任务。</small>}
+      {rows.length > 0 && (
+        <div className="job-history-table">
+          <div className="job-history-row head">
+            <span>任务</span>
+            <span>状态</span>
+            <span>阶段</span>
+            <span>帧进度</span>
+            <span>ASR</span>
+            <span>更新时间</span>
+            <span>错误</span>
+            <span>操作</span>
+          </div>
+          {rows.map((job) => {
+            const frameProgress = job.frame_progress || { total: 0, analyzed: 0, failed: 0, pending: 0 };
+            const canDelete = !isObservationJobActive(job);
+            return (
+              <div
+                className={job.id === selectedJobId ? "job-history-row active" : "job-history-row"}
+                key={job.id}
+              >
+                <span title={job.id}>{job.id.slice(0, 8)}</span>
+                <span>{job.status}</span>
+                <span>{job.phase || job.status}</span>
+                <span>
+                  {frameProgress.analyzed}/{frameProgress.total} · 待 {frameProgress.pending} · 失败 {frameProgress.failed}
+                </span>
+                <span>{observationJobAsrSummary(job)}</span>
+                <span>{formatOptionalDateTime(job.updated_at || job.created_at)}</span>
+                <span className={job.error_message ? "danger-text" : ""} title={job.error_message || ""}>
+                  {job.error_message || "-"}
+                </span>
+                <span className="job-history-actions">
+                  <button type="button" className="ghost compact" onClick={() => onSelect(job)}>
+                    <Eye size={14} />
+                    打开
+                  </button>
+                  <button type="button" className="ghost compact danger" onClick={() => onDelete(job)} disabled={busy || !canDelete}>
+                    <Trash2 size={14} />
+                    删除
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ObservationJobStatus({ job }: { job: ChildObservationAnalysisJob }) {
+  const progressRows = Object.values(job.asset_progress || {});
+  const frameProgress = job.frame_progress || { total: 0, analyzed: 0, failed: 0, pending: 0 };
+  return (
+    <div className="observation-status">
+      <span className="status-pill">
+        <FileClock size={14} />
+        {job.phase || job.status}
+      </span>
+      <small>
+        帧 {frameProgress.analyzed}/{frameProgress.total} · 待处理 {frameProgress.pending} · 失败 {frameProgress.failed}
+      </small>
+      {job.error_message && <small className="danger-text">{job.error_message}</small>}
+      {progressRows.length > 0 && (
+        <div className="asset-progress-table">
+          <div className="asset-progress-row head">
+            <span>视频/图片</span>
+            <span>状态</span>
+            <span>帧</span>
+            <span>音频</span>
+            <span>批次</span>
+          </div>
+          {progressRows.map((row, index) => (
+            <div className="asset-progress-row" key={row.asset_id || index}>
+              <span title={row.filename}>{row.filename || row.asset_id || `媒体 ${index + 1}`}</span>
+              <span className={row.status === "failed" ? "danger-text" : ""}>{row.status || "-"}</span>
+              <span>{row.frame_analyzed || 0}/{row.frame_total || 0}</span>
+              <span className={String(row.asr_status || "").includes("failed") ? "danger-text" : ""}>{row.asr_status || "-"}</span>
+              <span>{(row.contribution_batches || []).join(", ") || "-"}</span>
+              {row.error && <small className="danger-text">{row.error}</small>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ObservationDraftReview({
+  draft,
+  description,
+  authorizationConfirmed,
+  authorizationRationale,
+  busy,
+  onDescriptionChange,
+  onAuthorizationConfirmedChange,
+  onAuthorizationRationaleChange,
+  onAccept,
+  onReject
+}: {
+  draft: ChildObservationDraft;
+  description: string;
+  authorizationConfirmed: boolean;
+  authorizationRationale: string;
+  busy: boolean;
+  onDescriptionChange: (value: string) => void;
+  onAuthorizationConfirmedChange: (value: boolean) => void;
+  onAuthorizationRationaleChange: (value: string) => void;
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  const riskFlags = draft.risk_flags.map(asRecord);
+  const mediaDeleted = Boolean(draft.raw_media_deleted_at);
+  const accepted = Boolean(draft.accepted_child_description);
+
+  return (
+    <article className="observation-review">
+      <div className="panel-heading">
+        <div>
+          <h3>AI 生成儿童描述</h3>
+          <p>{draft.observable_summary || "已根据上传媒体汇总为最终描述。"}</p>
+        </div>
+        <span className="status-pill">{draft.status}</span>
+      </div>
+
+      <textarea
+        className="generated-description-input"
+        value={description}
+        onChange={(event) => onDescriptionChange(event.target.value)}
+        disabled={accepted}
+        placeholder="媒体分析完成后会在这里生成儿童描述；你可以在确认前编辑。"
+      />
+
+      {riskFlags.length > 0 && (
+        <section className="risk-review">
+          <div className="status-pill warning">
+            <ShieldAlert size={14} />
+            风险标记 {riskFlags.length}
+          </div>
+          <ul className="draft-list">
+            {riskFlags.map((flag, index) => (
+              <li key={index}>
+                {safeString(flag.category || "risk")} · {safeString(flag.severity || "review")} · {safeString(flag.message)}
+              </li>
+            ))}
+          </ul>
+          <label className="checkline">
+            <input type="checkbox" checked={authorizationConfirmed} onChange={(event) => onAuthorizationConfirmedChange(event.target.checked)} />
+            最终描述确需保留高风险内容，记录额外授权后继续
+          </label>
+          <textarea value={authorizationRationale} onChange={(event) => onAuthorizationRationaleChange(event.target.value)} placeholder="授权范围与操作理由" />
+        </section>
+      )}
+
+      <div className="observation-actions">
+        <button className="primary" onClick={onAccept} disabled={busy || accepted || !description.trim()}>
+          <CheckCircle2 size={16} />
+          确认描述并填入模板
+        </button>
+        <button onClick={onReject} disabled={busy || draft.status === "rejected" || draft.status === "converted"}>
+          <AlertTriangle size={16} />
+          拒绝并删除媒体
+        </button>
+      </div>
+      <small>{mediaDeleted ? `媒体删除时间：${formatDateTime(draft.raw_media_deleted_at || "")}` : "确认描述或拒绝后，原始媒体和预览会默认删除。"}</small>
+    </article>
   );
 }
 
@@ -1383,6 +1926,13 @@ function formatDraftValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function readLifeSlice(value: unknown): LifeSlice | null {
   const row = asRecord(value);
   const sceneDescription = safeString(row.scene_description || row.sceneDescription || row.scene);
@@ -1428,6 +1978,43 @@ function formatNumber(value: unknown): string {
 function formatSignedNumber(value: unknown): string {
   const numberValue = numericValue(value, 0);
   return `${numberValue > 0 ? "+" : ""}${numberValue.toFixed(1)}`;
+}
+
+function isObservationJobActive(job: ChildObservationAnalysisJob | null | undefined) {
+  return Boolean(job && ACTIVE_OBSERVATION_JOB_STATUSES.has(job.status));
+}
+
+function preferredObservationJob(jobs: ChildObservationAnalysisJob[], storedJobId: string) {
+  const storedJob = storedJobId ? jobs.find((job) => job.id === storedJobId) || null : null;
+  if (storedJob && isObservationJobActive(storedJob)) return storedJob;
+  const activeJob = jobs.find(isObservationJobActive);
+  if (activeJob) return activeJob;
+  if (storedJob?.observation_draft_id) return storedJob;
+  return jobs.find((job) => Boolean(job.observation_draft_id)) || null;
+}
+
+function upsertObservationJob(jobs: ChildObservationAnalysisJob[], job: ChildObservationAnalysisJob) {
+  return [job, ...jobs.filter((item) => item.id !== job.id)]
+    .sort((left, right) => timestampMs(right.created_at) - timestampMs(left.created_at))
+    .slice(0, 20);
+}
+
+function observationJobAsrSummary(job: ChildObservationAnalysisJob) {
+  const rows = Object.values(job.asset_progress || {}).filter((row) => row.media_type === "video" || row.asr_status);
+  if (!rows.length) return "-";
+  const completed = rows.filter((row) => row.asr_status === "completed").length;
+  const failed = rows.filter((row) => String(row.asr_status || "").includes("failed")).length;
+  return failed ? `${completed}/${rows.length} · 失败 ${failed}` : `${completed}/${rows.length}`;
+}
+
+function timestampMs(value?: string | null) {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function formatOptionalDateTime(value?: string | null) {
+  return value ? formatDateTime(value) : "-";
 }
 
 function formatDateTime(value: string) {

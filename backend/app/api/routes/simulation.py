@@ -13,6 +13,7 @@ from app.models.entities import (
     AgentRelationship,
     AgentState,
     AuditLog,
+    ChildMultimodalObservationDraft,
     ChildWorldDraft,
     CommunityRule,
     GrowthReport,
@@ -90,7 +91,25 @@ async def create_child_world_draft(
     session: AsyncSession = Depends(get_session),
     admin: AuthenticatedUser = Depends(get_current_user),
 ) -> ChildWorldDraft:
+    source_observation_draft: ChildMultimodalObservationDraft | None = None
+    if payload.source_observation_draft_id:
+        source_observation_draft = await session.get(ChildMultimodalObservationDraft, payload.source_observation_draft_id)
+        if source_observation_draft is None:
+            raise HTTPException(status_code=404, detail="多模态观察草稿不存在")
+        if not source_observation_draft.accepted_child_description:
+            raise HTTPException(status_code=400, detail="多模态观察草稿尚未确认最终儿童描述")
     draft = await ChildWorldDraftService().create_draft(session, payload)
+    if source_observation_draft is not None:
+        source_observation_draft.child_world_draft_id = draft.id
+        draft.input_params = {
+            **(draft.input_params or {}),
+            "observation_provenance": {
+                "observation_draft_id": source_observation_draft.id,
+                "analysis_job_id": source_observation_draft.analysis_job_id,
+                "target_child": source_observation_draft.target_child,
+                "description_source": "accepted_child_description",
+            },
+        }
     _audit(session, actor=admin.username, action="child_world.draft.create", target_id=draft.id, payload={"template_key": draft.template_key})
     await session.commit()
     await session.refresh(draft)

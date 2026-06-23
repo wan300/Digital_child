@@ -387,6 +387,106 @@ class ChildWorldDraft(Base, TimestampMixin):
     created_world_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
 
+class MediaAsset(Base, TimestampMixin):
+    __tablename__ = "media_assets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_actor: Mapped[str] = mapped_column(String(160), default="admin", nullable=False, index=True)
+    original_filename: Mapped[str] = mapped_column(String(260), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    mime_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preview_refs: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="uploaded", nullable=False, index=True)
+    privacy_flags: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    deletion_reason: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
+
+
+class MediaAnalysisJob(Base, TimestampMixin):
+    __tablename__ = "media_analysis_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    status: Mapped[str] = mapped_column(String(40), default="queued", nullable=False, index=True)
+    asset_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    analyzed_asset_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    pending_asset_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    skipped_asset_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    excluded_asset_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    target_child: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    model_provider: Mapped[str] = mapped_column(String(80), default="local", nullable=False)
+    model_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    raw_response: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    normalized_result: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChildMultimodalObservationDraft(Base, TimestampMixin):
+    __tablename__ = "child_multimodal_observation_drafts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    status: Mapped[str] = mapped_column(String(40), default="draft", nullable=False, index=True)
+    analysis_job_id: Mapped[str] = mapped_column(ForeignKey("media_analysis_jobs.id", ondelete="CASCADE"), index=True, nullable=False)
+    child_world_draft_id: Mapped[str | None] = mapped_column(ForeignKey("child_world_drafts.id", ondelete="SET NULL"), index=True, nullable=True)
+    structured_setup: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    target_child: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    observable_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    generated_child_description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    accepted_child_description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    visible_observations: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    audio_observations: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    non_identifying_appearance: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    behavior_signals: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    temperament_hypotheses: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    interests: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    development_hints: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    avatar_brief: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    initial_memory_candidates: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    unknowns: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    risk_flags: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    authorization_confirmation: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    approved_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    rejected_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    raw_media_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    analysis_job: Mapped[MediaAnalysisJob] = relationship()
+    child_world_draft: Mapped[ChildWorldDraft | None] = relationship()
+    review_decisions: Mapped[list["ObservationReviewDecision"]] = relationship(
+        back_populates="observation_draft",
+        cascade="all, delete-orphan",
+    )
+
+
+class ObservationReviewDecision(Base, TimestampMixin):
+    __tablename__ = "observation_review_decisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    observation_draft_id: Mapped[str] = mapped_column(
+        ForeignKey("child_multimodal_observation_drafts.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    item_path: Mapped[str] = mapped_column(String(240), nullable=False)
+    decision: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    original_value: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    final_value: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    evidence_refs: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    observation_draft: Mapped[ChildMultimodalObservationDraft] = relationship(back_populates="review_decisions")
+
+
 class AgentRelationship(Base, TimestampMixin):
     __tablename__ = "agent_relationships"
 

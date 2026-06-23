@@ -105,6 +105,143 @@ export type ChildWorldDraft = {
   updated_at: string;
 };
 
+export type ChildObservationStructuredSetup = {
+  template_key?: string;
+  child_display_name?: string | null;
+  child_name?: string | null;
+  age_months?: number;
+  caregiver_1_label?: string;
+  caregiver_2_label?: string;
+  kindergarten_class?: string;
+  peer_count?: number;
+  natural_language_prompt?: string;
+  seed?: number | null;
+};
+
+export type ChildObservationMediaAsset = {
+  id: string;
+  owner_actor: string;
+  original_filename: string;
+  media_type: string;
+  mime_type: string;
+  sha256: string;
+  size_bytes: number;
+  duration_seconds: number | null;
+  width: number | null;
+  height: number | null;
+  preview_refs: unknown[];
+  preview_retention: string;
+  status: string;
+  privacy_flags: unknown[];
+  deletion_reason: string;
+  deleted_at: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChildObservationAssetStates = {
+  analyzed: string[];
+  pending: string[];
+  skipped: string[];
+  excluded: string[];
+};
+
+export type ChildObservationAnalysisJob = {
+  id: string;
+  status: string;
+  phase: string;
+  asset_states: ChildObservationAssetStates;
+  asset_progress: Record<string, {
+    asset_id?: string;
+    filename?: string;
+    media_type?: string;
+    status?: string;
+    frame_total?: number;
+    frame_analyzed?: number;
+    asr_status?: string;
+    contribution_batches?: number[];
+    error?: string;
+  }>;
+  frame_progress: {
+    total: number;
+    analyzed: number;
+    failed: number;
+    pending: number;
+  };
+  target_child: Record<string, unknown>;
+  observation_draft_id: string | null;
+  error_message: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ChildObservationReviewItem = {
+  item_path: string;
+  decision: "approved" | "edited" | "rejected" | "downgraded" | "unknown";
+  final_value?: Record<string, unknown> | string | null;
+  rationale?: string;
+};
+
+export type ChildObservationDraft = {
+  id: string;
+  status: string;
+  analysis_job_id: string;
+  child_world_draft_id: string | null;
+  structured_setup: Record<string, unknown>;
+  target_child: Record<string, unknown>;
+  observable_summary: string;
+  generated_child_description: string;
+  accepted_child_description: string;
+  visible_observations: unknown[];
+  audio_observations: unknown[];
+  non_identifying_appearance: unknown[];
+  behavior_signals: unknown[];
+  temperament_hypotheses: unknown[];
+  interests: unknown[];
+  development_hints: Record<string, unknown>;
+  avatar_brief: Record<string, unknown>;
+  initial_memory_candidates: unknown[];
+  unknowns: unknown[];
+  risk_flags: unknown[];
+  authorization_confirmation: Record<string, unknown>;
+  approved_payload: Record<string, unknown>;
+  raw_media_deleted_at: string | null;
+  asset_states?: ChildObservationAssetStates | null;
+  preview_refs: unknown[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChildObservationReviewResponse = {
+  id: string;
+  status: string;
+  approved_payload: Record<string, unknown>;
+  raw_media_deleted: boolean;
+  raw_media_deletion_pending: boolean;
+};
+
+export type ChildObservationDescriptionAcceptResponse = {
+  id: string;
+  status: string;
+  accepted_child_description: string;
+  raw_media_deleted: boolean;
+  risk_flags: unknown[];
+};
+
+export type ChildObservationConvertResponse = {
+  observation_draft_id: string;
+  child_world_draft_id: string;
+  raw_media_deleted: boolean;
+};
+
+export type ChildObservationHistoryDeleteResponse = {
+  id: string;
+  observation_draft_id: string | null;
+  raw_media_deleted: boolean;
+  deleted_asset_ids: string[];
+};
+
 export type WorldLocation = {
   id: string;
   world_id: string;

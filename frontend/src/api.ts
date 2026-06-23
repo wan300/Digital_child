@@ -2,6 +2,15 @@ import type {
   CommunityRule,
   AgentRelationship,
   BranchPreview,
+  ChildObservationAnalysisJob,
+  ChildObservationDescriptionAcceptResponse,
+  ChildObservationConvertResponse,
+  ChildObservationDraft,
+  ChildObservationHistoryDeleteResponse,
+  ChildObservationMediaAsset,
+  ChildObservationReviewItem,
+  ChildObservationReviewResponse,
+  ChildObservationStructuredSetup,
   ChildWorldDraft,
   GrowthReport,
   Persona,
@@ -84,6 +93,7 @@ export const worldApi = {
       peer_count?: number;
       natural_language_prompt?: string;
       seed?: number;
+      source_observation_draft_id?: string | null;
     }
   ) => api<ChildWorldDraft>("/worlds/child-drafts", token, { method: "POST", body: JSON.stringify(payload) }),
   confirmChildDraft: (
@@ -91,6 +101,79 @@ export const worldApi = {
     draftId: string,
     payload: { parsed_draft?: Record<string, unknown>; world_name?: string; seed?: number; start_running?: boolean }
   ) => api<SimulationWorld>(`/worlds/child-drafts/${draftId}/confirm`, token, { method: "POST", body: JSON.stringify(payload) }),
+  uploadObservationMedia: (token: string, files: File[], draftSessionId?: string) => {
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+    if (draftSessionId) form.append("draft_session_id", draftSessionId);
+    return api<{ assets: ChildObservationMediaAsset[]; errors?: Array<Record<string, unknown>> }>("/worlds/child-observations/media", token, {
+      method: "POST",
+      body: form
+    });
+  },
+  createObservationAnalysisJob: (
+    token: string,
+    payload: {
+      asset_ids: string[];
+      structured_setup: ChildObservationStructuredSetup;
+      target_child_hint?: Record<string, unknown> | null;
+      include_audio?: boolean;
+    }
+  ) => api<ChildObservationAnalysisJob>("/worlds/child-observations/analysis-jobs", token, { method: "POST", body: JSON.stringify(payload) }),
+  observationAnalysisJobs: (token: string, options: { status?: "all" | "active" | "terminal"; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    params.set("status", options.status || "all");
+    params.set("limit", String(options.limit || 20));
+    return api<ChildObservationAnalysisJob[]>(`/worlds/child-observations/analysis-jobs?${params.toString()}`, token);
+  },
+  observationAnalysisJob: (token: string, jobId: string) => api<ChildObservationAnalysisJob>(`/worlds/child-observations/analysis-jobs/${jobId}`, token),
+  deleteObservationAnalysisJob: (token: string, jobId: string) =>
+    api<ChildObservationHistoryDeleteResponse>(`/worlds/child-observations/analysis-jobs/${jobId}`, token, { method: "DELETE" }),
+  observationDraft: (token: string, draftId: string) => api<ChildObservationDraft>(`/worlds/child-observations/drafts/${draftId}`, token),
+  reviewObservationDraft: (
+    token: string,
+    draftId: string,
+    payload: {
+      target_child_confirmation?: { confirmed: boolean; operator_override?: string | null };
+      decisions: ChildObservationReviewItem[];
+      authorization_confirmation?: {
+        confirmed: boolean;
+        authorization_scope?: string[];
+        risk_categories?: string[];
+        operator_rationale?: string;
+        retained_content_scope?: string;
+      };
+    }
+  ) => api<ChildObservationReviewResponse>(`/worlds/child-observations/drafts/${draftId}/review`, token, { method: "POST", body: JSON.stringify(payload) }),
+  acceptObservationDescription: (
+    token: string,
+    draftId: string,
+    payload: {
+      description: string;
+      authorization_confirmation?: {
+        confirmed: boolean;
+        authorization_scope?: string[];
+        risk_categories?: string[];
+        operator_rationale?: string;
+        retained_content_scope?: string;
+      };
+    }
+  ) =>
+    api<ChildObservationDescriptionAcceptResponse>(`/worlds/child-observations/drafts/${draftId}/accept-description`, token, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  convertObservationDraft: (token: string, draftId: string) =>
+    api<ChildObservationConvertResponse>(`/worlds/child-observations/drafts/${draftId}/convert`, token, {
+      method: "POST",
+      body: JSON.stringify({ start_child_world_draft: true })
+    }),
+  rejectObservationDraft: (token: string, draftId: string, reason: string) =>
+    api<{ id: string; status: string; raw_media_deleted: boolean }>(`/worlds/child-observations/drafts/${draftId}/reject`, token, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    }),
+  deleteObservationMedia: (token: string, assetId: string) =>
+    api<{ id: string; status: string; deleted_at: string | null }>(`/worlds/child-observations/media/${assetId}`, token, { method: "DELETE" }),
   create: (token: string, payload: { name: string; seed?: number; speed?: number; settings?: Record<string, unknown> }) =>
     api<SimulationWorld>("/worlds", token, { method: "POST", body: JSON.stringify(payload) }),
   update: (token: string, worldId: string, payload: Partial<Pick<SimulationWorld, "name" | "status" | "speed" | "settings">>) =>

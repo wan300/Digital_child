@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 PersonaType = Literal["fictional_persona", "authorized_real_persona"]
 Decision = Literal["pending", "approved", "rejected"]
@@ -331,6 +331,7 @@ class ChildWorldDraftRequest(BaseModel):
     peer_count: int = Field(default=2, ge=2, le=4)
     natural_language_prompt: str = ""
     seed: int | None = None
+    source_observation_draft_id: str | None = Field(default=None, max_length=36)
 
 
 class ChildWorldDraftConfirm(BaseModel):
@@ -354,6 +355,220 @@ class ChildWorldDraftResponse(BaseModel):
     created_world_id: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ChildObservationStructuredSetup(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    template_key: str = Field(default="curious_outgoing", max_length=80)
+    child_display_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("child_display_name", "child_name"),
+        max_length=160,
+    )
+    age_months: int = Field(default=48, ge=36, le=72)
+    caregiver_1_label: str = Field(default="照护者一", max_length=40)
+    caregiver_2_label: str = Field(default="照护者二", max_length=40)
+    kindergarten_class: str = Field(default="幼儿园混龄班", max_length=80)
+    peer_count: int = Field(default=2, ge=2, le=4)
+    natural_language_prompt: str = ""
+    seed: int | None = None
+
+    def to_child_world_request(self, prompt: str | None = None, source_observation_draft_id: str | None = None) -> ChildWorldDraftRequest:
+        return ChildWorldDraftRequest(
+            template_key=self.template_key,
+            child_name=self.child_display_name,
+            age_months=self.age_months,
+            caregiver_1_label=self.caregiver_1_label,
+            caregiver_2_label=self.caregiver_2_label,
+            kindergarten_class=self.kindergarten_class,
+            peer_count=self.peer_count,
+            natural_language_prompt=prompt if prompt is not None else self.natural_language_prompt,
+            seed=self.seed,
+            source_observation_draft_id=source_observation_draft_id,
+        )
+
+
+class MediaAssetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: str
+    owner_actor: str
+    original_filename: str
+    media_type: str
+    mime_type: str
+    sha256: str
+    size_bytes: int
+    duration_seconds: float | None
+    width: int | None
+    height: int | None
+    preview_refs: list[Any]
+    preview_retention: str = "review_only_delete_with_raw"
+    status: str
+    privacy_flags: list[Any]
+    deletion_reason: str
+    deleted_at: datetime | None
+    metadata: dict[str, Any] = Field(default_factory=dict, validation_alias="metadata_")
+    created_at: datetime
+    updated_at: datetime
+
+
+class MediaUploadResponse(BaseModel):
+    assets: list[MediaAssetResponse]
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AssetStates(BaseModel):
+    analyzed: list[str] = Field(default_factory=list)
+    pending: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+    excluded: list[str] = Field(default_factory=list)
+
+
+class TargetChildDescriptor(BaseModel):
+    description: str = ""
+    confidence: float = Field(default=0, ge=0, le=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+    operator_confirmed: bool = False
+    operator_override: str | None = None
+    confidence_band: str = "low"
+
+
+class ChildObservationAnalysisJobCreate(BaseModel):
+    asset_ids: list[str] = Field(default_factory=list)
+    structured_setup: ChildObservationStructuredSetup
+    target_child_hint: dict[str, Any] | None = None
+    include_audio: bool = True
+
+
+class MediaAnalysisJobResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    status: str
+    phase: str = ""
+    asset_states: AssetStates
+    asset_progress: dict[str, Any] = Field(default_factory=dict)
+    frame_progress: dict[str, int] = Field(default_factory=lambda: {"total": 0, "analyzed": 0, "failed": 0, "pending": 0})
+    target_child: dict[str, Any]
+    observation_draft_id: str | None = None
+    error_message: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ObservationReviewItem(BaseModel):
+    item_path: str = Field(min_length=1, max_length=240)
+    decision: Literal["approved", "edited", "rejected", "downgraded", "unknown"]
+    final_value: dict[str, Any] | str | None = None
+    rationale: str = ""
+
+
+class TargetChildConfirmation(BaseModel):
+    confirmed: bool = False
+    operator_override: str | None = Field(default=None, max_length=400)
+
+
+class AuthorizationConfirmation(BaseModel):
+    confirmed: bool = False
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    authorization_scope: list[str] = Field(default_factory=list)
+    risk_categories: list[str] = Field(default_factory=list)
+    operator_rationale: str = ""
+    retained_content_scope: str = ""
+
+
+class ObservationDraftResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    status: str
+    analysis_job_id: str
+    child_world_draft_id: str | None
+    structured_setup: dict[str, Any]
+    target_child: dict[str, Any]
+    observable_summary: str
+    visible_observations: list[Any]
+    generated_child_description: str = ""
+    accepted_child_description: str = ""
+    audio_observations: list[Any]
+    non_identifying_appearance: list[Any]
+    behavior_signals: list[Any]
+    temperament_hypotheses: list[Any]
+    interests: list[Any]
+    development_hints: dict[str, Any]
+    avatar_brief: dict[str, Any]
+    initial_memory_candidates: list[Any]
+    unknowns: list[Any]
+    risk_flags: list[Any]
+    authorization_confirmation: dict[str, Any]
+    approved_payload: dict[str, Any]
+    raw_media_deleted_at: datetime | None
+    asset_states: AssetStates | None = None
+    preview_refs: list[Any] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ObservationReviewRequest(BaseModel):
+    target_child_confirmation: TargetChildConfirmation = Field(default_factory=TargetChildConfirmation)
+    decisions: list[ObservationReviewItem] = Field(default_factory=list)
+    authorization_confirmation: AuthorizationConfirmation = Field(default_factory=AuthorizationConfirmation)
+
+
+class ObservationReviewResponse(BaseModel):
+    id: str
+    status: str
+    approved_payload: dict[str, Any]
+    raw_media_deleted: bool
+    raw_media_deletion_pending: bool = False
+
+
+class ObservationDescriptionAcceptRequest(BaseModel):
+    description: str = Field(min_length=1, max_length=6000)
+    authorization_confirmation: AuthorizationConfirmation = Field(default_factory=AuthorizationConfirmation)
+
+
+class ObservationDescriptionAcceptResponse(BaseModel):
+    id: str
+    status: str
+    accepted_child_description: str
+    raw_media_deleted: bool
+    risk_flags: list[Any] = Field(default_factory=list)
+
+
+class ObservationConvertRequest(BaseModel):
+    start_child_world_draft: bool = True
+
+
+class ObservationConvertResponse(BaseModel):
+    observation_draft_id: str
+    child_world_draft_id: str
+    raw_media_deleted: bool
+
+
+class ObservationRejectRequest(BaseModel):
+    reason: str = Field(default="", max_length=500)
+
+
+class ObservationRejectResponse(BaseModel):
+    id: str
+    status: str
+    raw_media_deleted: bool
+
+
+class ObservationHistoryDeleteResponse(BaseModel):
+    id: str
+    observation_draft_id: str | None = None
+    raw_media_deleted: bool
+    deleted_asset_ids: list[str] = Field(default_factory=list)
+
+
+class MediaDeleteResponse(BaseModel):
+    id: str
+    status: str
+    deleted_at: datetime | None
 
 
 class SimulationWorldUpdate(BaseModel):

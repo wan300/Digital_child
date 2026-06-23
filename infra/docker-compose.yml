@@ -107,9 +107,11 @@ services:
       QDRANT_URL: http://qdrant:6333
       LIGHTRAG_BASE_URL: http://lightrag:9621
       BACKEND_CORS_ORIGINS: http://localhost:5173,http://localhost:8080
-      BACKEND_WORKERS: 2
+      BACKEND_WORKERS: 1
     ports:
       - "8000:8000"
+    volumes:
+      - backend_media:/app/data/media
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()\""]
       interval: 10s
@@ -140,6 +142,8 @@ services:
       NEO4J_URI: bolt://neo4j:7687
       QDRANT_URL: http://qdrant:6333
       LIGHTRAG_BASE_URL: http://lightrag:9621
+    volumes:
+      - backend_media:/app/data/media
     command: ["python", "-m", "app.workers.worker"]
     depends_on:
       backend:
@@ -162,3 +166,4 @@ volumes:
   letta_data:
   letta_state:
   lightrag_data:
+  backend_media:

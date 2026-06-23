@@ -6,9 +6,13 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+backend/.test-tmp/
 .venv/
 data/
+backend/data/media/
+backend/data/media/previews/
 logs/
+output/
 *.log
 npm-debug.log*
 yarn-debug.log*

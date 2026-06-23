@@ -61,6 +61,25 @@ class Settings(BaseSettings):
     simulation_external_gm_timeout_seconds: float = 35.0
     simulation_direct_llm_timeout_seconds: float = 20.0
     simulation_step_lock_timeout_seconds: int = 180
+    multimodal_media_dir: Path = Path("data/media")
+    multimodal_preview_dir: Path = Path("data/media/previews")
+    multimodal_max_upload_bytes: int = 256 * 1024 * 1024
+    multimodal_job_batch_size: int = 8
+    multimodal_frame_interval_seconds: int = 1
+    multimodal_frame_batch_size: int = 1
+    multimodal_contact_sheet_frames_per_sheet: int = 4
+    multimodal_contact_sheet_max_sheets_per_video: int = 1
+    multimodal_allow_deterministic_fallback: bool = False
+    multimodal_base_url: str = ""
+    multimodal_api_key: str = ""
+    multimodal_model_name: str = "gpt-4o"
+    multimodal_asr_model_name: str = "FunAudioLLM/SenseVoiceSmall"
+    multimodal_request_timeout_seconds: float = 240.0
+    multimodal_model_aggregation_enabled: bool = False
+    multimodal_audio_analysis_enabled: bool = True
+    multimodal_rate_limit_retry_delays_seconds: str = "10,30,60"
+    multimodal_target_confidence_high: float = 0.8
+    multimodal_target_confidence_medium: float = 0.5
 
     @field_validator("backend_cors_origins", mode="before")
     @classmethod

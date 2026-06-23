@@ -49,6 +49,18 @@ button:disabled {
   background: transparent;
 }
 
+.ghost.compact {
+  min-height: 28px;
+  padding: 0 8px;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.ghost.danger {
+  color: #9c3f3f;
+  border-color: #e5c8c8;
+}
+
 input,
 textarea,
 select {
@@ -581,6 +593,214 @@ pre {
   min-width: 0;
 }
 
+.observation-workflow,
+.observation-review,
+.observation-section,
+.risk-review {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.observation-workflow {
+  border: 1px solid #e1e8e5;
+  border-radius: 8px;
+  padding: 14px;
+  background: #fafcfb;
+}
+
+.observation-toolbar,
+.observation-actions,
+.target-review-row,
+.observation-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.file-picker {
+  min-height: 38px;
+  border: 1px solid #cbd5dc;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.file-picker input {
+  display: none;
+}
+
+.media-asset-list,
+.observation-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.media-asset-list article,
+.observation-preview-grid article,
+.observation-item {
+  border: 1px solid #e1e8e5;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.media-asset-list article {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.media-asset-list strong,
+.observation-item strong,
+.observation-preview-grid strong {
+  overflow-wrap: anywhere;
+}
+
+.asset-progress-table {
+  width: 100%;
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.observation-job-history {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid #e1e8e5;
+  border-radius: 8px;
+  background: #fafcfb;
+  padding: 10px 12px;
+}
+
+.observation-history-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.job-history-table {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.job-history-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(64px, 0.6fr) minmax(72px, 0.7fr) minmax(104px, 0.9fr) minmax(136px, 1.2fr) minmax(72px, 0.6fr) minmax(132px, 1fr) minmax(96px, 0.8fr) minmax(132px, 0.9fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  border: 1px solid #e1e8e5;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 6px 8px;
+  color: #263b37;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+}
+
+.job-history-row.head {
+  background: #eef5f2;
+  color: #31514a;
+  font-weight: 700;
+  cursor: default;
+}
+
+.job-history-row.active {
+  border-color: #2d6a5f;
+  background: #edf7f4;
+  box-shadow: inset 0 0 0 1px #2d6a5f;
+}
+
+.job-history-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-history-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  overflow: visible;
+}
+
+.asset-progress-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.6fr) minmax(72px, 0.7fr) minmax(62px, 0.5fr) minmax(110px, 0.9fr) minmax(70px, 0.6fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+  border: 1px solid #e1e8e5;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.asset-progress-row.head {
+  background: #eef5f2;
+  color: #31514a;
+  font-weight: 700;
+}
+
+.asset-progress-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-progress-row small {
+  grid-column: 1 / -1;
+}
+
+.observation-review {
+  border-top: 1px solid #e4eaee;
+  padding-top: 12px;
+}
+
+.generated-description-input {
+  min-height: 140px;
+  resize: vertical;
+}
+
+.observation-item {
+  display: grid;
+  gap: 10px;
+}
+
+.observation-item-controls {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.observation-item-controls textarea {
+  min-height: 62px;
+}
+
+.target-review-row {
+  justify-content: space-between;
+}
+
+.danger-text {
+  color: #8d2d2d;
+}
+
 .draft-section {
   display: grid;
   gap: 10px;
@@ -1017,7 +1237,11 @@ h3 {
   .draft-summary-grid,
   .draft-block-grid,
   .draft-entity-grid,
-  .draft-key-values {
+  .draft-key-values,
+  .media-asset-list,
+  .observation-preview-grid,
+  .observation-item-controls,
+  .job-history-row {
     grid-template-columns: 1fr;
   }
 }
